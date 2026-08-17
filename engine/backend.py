@@ -470,6 +470,7 @@ class InferenceBackend:
         on_thinking_chunk: callable = None,
         on_tool_call_start: callable = None,
         on_tool_call_args_chunk: callable = None,
+        on_tool_call_named: callable = None,  # (index, name) — pairs args chunks with a call
         cancel_event=None,  # threading.Event | None — interrupt between chunks
     ) -> tuple[Message, dict]:
         """Stream with callbacks for live output. Returns final (Message, usage).
@@ -526,6 +527,8 @@ class InferenceBackend:
                         func = tc_delta.get("function", {})
                         if func.get("name"):
                             entry["name"] = func["name"]
+                            if on_tool_call_named:
+                                on_tool_call_named(idx, entry["name"])
                             if on_tool_call_start:
                                 on_tool_call_start(entry["name"])
 

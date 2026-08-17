@@ -331,3 +331,19 @@ class GroundingGuard(unittest.TestCase):
         self.assertFalse(need("What is a Python decorator?", long, "question", []))
         self.assertFalse(need("What do you think of this project?", "Which part?", "question", []))
         self.assertFalse(need("fix the bug in this repo", long, "edit", []))
+
+
+class LiveCodeDecoding(unittest.TestCase):
+    """The engine decodes a write call's JSON string argument incrementally."""
+
+    def test_partial_json_string_handles_escapes_and_truncation(self):
+        from tether.engine.query_engine import _partial_json_string, _json_string_closed
+        buf = '{"file_path": "m.py", "content": "def f():\\n    return \\"x\\"'
+        self.assertEqual(_partial_json_string(buf, ("content",)), 'def f():\n    return "x"')
+        self.assertTrue(_json_string_closed(buf, "file_path"))
+        self.assertFalse(_json_string_closed(buf, "content"))
+        # dangling backslash / incomplete \\u escape: wait for more
+        self.assertEqual(_partial_json_string(buf + "\\", ("content",)), 'def f():\n    return "x"')
+        self.assertEqual(_partial_json_string(buf + "\\u00", ("content",)), 'def f():\n    return "x"')
+        self.assertEqual(_partial_json_string(buf + '\\u00e9"}', ("content",)), 'def f():\n    return "x"é')
+        self.assertIsNone(_partial_json_string('{"file_path": "a', ("content",)))

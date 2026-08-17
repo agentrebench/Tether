@@ -526,6 +526,74 @@ def _describe_api_error(code: int, body: str, config) -> str:
     return ""
 
 
+# Which argument carries "the code" for each write-ish tool, in priority order.
+_LIVE_CODE_KEYS = {
+    "file_write": ("content",),
+    "file_edit": ("new_string",),
+}
+
+
+def _find_json_string_start(buf: str, key: str) -> int:
+    """Index just past the opening quote of ``"key": "`` in a (partial) JSON
+    object, or -1. Tolerates whitespace; ignores occurrences inside other values
+    only heuristically (keys are distinctive enough for tool arguments)."""
+    match = re.search(r'"' + re.escape(key) + r'"\s*:\s*"', buf)
+    return match.end() if match else -1
+
+
+def _partial_json_string(buf: str, keys: tuple) -> str | None:
+    """Decode the JSON string value of the first present ``keys`` entry from a
+    possibly-truncated JSON object, up to whatever has streamed so far. Stops
+    before an incomplete escape so a later chunk can complete it."""
+    for key in keys:
+        start = _find_json_string_start(buf, key)
+        if start < 0:
+            continue
+        out: list[str] = []
+        i, n = start, len(buf)
+        while i < n:
+            ch = buf[i]
+            if ch == '"':
+                break
+            if ch == "\\":
+                if i + 1 >= n:
+                    break  # dangling backslash: wait for more
+                esc = buf[i + 1]
+                if esc == "u":
+                    if i + 6 > n:
+                        break
+                    try:
+                        out.append(chr(int(buf[i + 2:i + 6], 16)))
+                    except ValueError:
+                        out.append("?")
+                    i += 6
+                    continue
+                out.append({"n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f",
+                            '"': '"', "\\": "\\", "/": "/"}.get(esc, esc))
+                i += 2
+                continue
+            out.append(ch)
+            i += 1
+        return "".join(out)
+    return None
+
+
+def _json_string_closed(buf: str, key: str) -> bool:
+    """True once the string value for ``key`` has its closing quote."""
+    start = _find_json_string_start(buf, key)
+    if start < 0:
+        return False
+    i, n = start, len(buf)
+    while i < n:
+        if buf[i] == "\\":
+            i += 2
+            continue
+        if buf[i] == '"':
+            return True
+        i += 1
+    return False
+
+
 class QueryEngine:
     def __init__(
         self,
@@ -935,8 +1003,34 @@ class QueryEngine:
                 sys.stdout.write(f"\n  {MAGENTA}{BOLD}{tool_label(name)}{RESET}")
                 sys.stdout.flush()
 
+            # Live code: as a file_write/file_edit call's JSON arguments stream
+            # in, decode the `content` / `new_string` value incrementally and
+            # emit the new characters, so the desktop shows the code being
+            # typed instead of waiting for the whole call.
+            live_calls: dict[int, dict] = {}   # idx -> {name, buf, sent, path_sent}
+
+            def on_tool_call_named(idx: int, name: str):
+                live_calls[idx] = {"name": name, "buf": "", "sent": 0, "path": ""}
+
             def on_tool_call_args_chunk(idx: int, text: str):
-                pass
+                call = live_calls.get(idx)
+                if call is None or call["name"] not in _LIVE_CODE_KEYS:
+                    return
+                call["buf"] += text
+                keys = _LIVE_CODE_KEYS[call["name"]]
+                if not call["path"]:
+                    path = _partial_json_string(call["buf"], ("file_path",))
+                    if path and _json_string_closed(call["buf"], "file_path"):
+                        call["path"] = path
+                decoded = _partial_json_string(call["buf"], keys)
+                if decoded is None or len(decoded) <= call["sent"]:
+                    return
+                delta = decoded[call["sent"]:]
+                call["sent"] = len(decoded)
+                self._emit_stream_event(StreamEvent(
+                    type="tool_code", tool_name=call["name"], text=delta,
+                    metadata={"path": call["path"], "index": idx},
+                ))
 
             try:
                 assistant_msg, raw_usage = self.backend.chat_completion_stream_parsed(
@@ -948,6 +1042,7 @@ class QueryEngine:
                     on_thinking_chunk=on_thinking_chunk,
                     on_tool_call_start=on_tool_call_start,
                     on_tool_call_args_chunk=on_tool_call_args_chunk,
+                    on_tool_call_named=on_tool_call_named,
                     cancel_event=cancel_event,
                 )
                 highlighter.flush()

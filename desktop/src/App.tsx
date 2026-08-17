@@ -672,6 +672,9 @@ export default function App() {
   const conversationRef = useRef<HTMLElement>(null);
   const autoFollowRef = useRef(true);
   const pendingTextRef = useRef<Map<string, string>>(new Map());
+  // Live code for write-ish calls, keyed by turn id, then by tool name: the
+  // model's argument stream is decoded engine-side and arrives as deltas.
+  const pendingCodeRef = useRef<Map<string, Map<string, { delta: string; path: string }>>>(new Map());
   const agentSnapshotsRef = useRef<Map<string, AgentSnapshot[]>>(new Map());
   const approvalInFlightRef = useRef("");
   const streamFrameRef = useRef<number | null>(null);
@@ -726,16 +729,42 @@ export default function App() {
     streamFrameRef.current = null;
     streamTimeoutRef.current = null;
     const pending = pendingTextRef.current;
-    if (pending.size === 0) return;
+    const pendingCode = pendingCodeRef.current;
+    if (pending.size === 0 && pendingCode.size === 0) return;
     pendingTextRef.current = new Map();
+    pendingCodeRef.current = new Map();
     lastStreamFlushRef.current = performance.now();
     setMessages((current) => current.map((message) => {
       const delta = pending.get(message.id);
-      return delta
-        ? { ...message, text: message.text + delta, segments: appendTextSegment(message.segments, delta) }
-        : message;
+      const codeDeltas = pendingCode.get(message.id);
+      if (!delta && !codeDeltas) return message;
+      let next = message;
+      if (delta) {
+        next = { ...next, text: next.text + delta, segments: appendTextSegment(next.segments, delta) };
+      }
+      if (codeDeltas) {
+        for (const [name, code] of codeDeltas) {
+          next = {
+            ...next,
+            toolActivities: appendLiveCode(next.toolActivities ?? [], name, code.delta, code.path),
+            segments: appendLiveCodeInSegments(next.segments, name, code.delta, code.path),
+          };
+        }
+      }
+      return next;
     }));
   }, []);
+
+  const queueToolCode = useCallback((turnId: string, name: string, delta: string, path: string) => {
+    if (!turnId || !name || !delta) return;
+    const perTurn = pendingCodeRef.current.get(turnId) ?? new Map<string, { delta: string; path: string }>();
+    const existing = perTurn.get(name);
+    perTurn.set(name, { delta: (existing?.delta ?? "") + delta, path: path || existing?.path || "" });
+    pendingCodeRef.current.set(turnId, perTurn);
+    if (streamFrameRef.current === null && streamTimeoutRef.current === null) {
+      streamFrameRef.current = window.requestAnimationFrame(flushStreamText);
+    }
+  }, [flushStreamText]);
 
   const queueStreamText = useCallback((turnId: string, delta: string) => {
     if (!turnId || !delta) return;
@@ -780,7 +809,9 @@ export default function App() {
   const discardQueuedText = useCallback((turnId?: string) => {
     if (turnId) pendingTextRef.current.delete(turnId);
     else pendingTextRef.current.clear();
-    if (pendingTextRef.current.size === 0) cancelScheduledFlush();
+    if (turnId) pendingCodeRef.current.delete(turnId);
+    else pendingCodeRef.current.clear();
+    if (pendingTextRef.current.size === 0 && pendingCodeRef.current.size === 0) cancelScheduledFlush();
   }, [cancelScheduledFlush]);
 
   useEffect(() => () => discardQueuedText(), [discardQueuedText]);
@@ -992,6 +1023,10 @@ export default function App() {
                 })()
               : message
           )));
+        } else if (kind === "tool_code") {
+          const meta = asRecord(payload.metadata);
+          setActivity(`Writing ${asString(meta.path) ? shortPath(asString(meta.path)) : "code"}…`);
+          queueToolCode(turnId, asString(payload.tool, ""), asString(payload.text), asString(meta.path));
         } else if (kind === "text") {
           setActivity("Writing response…");
           queueStreamText(turnId, asString(payload.text));
@@ -2295,6 +2330,32 @@ function finishActivity(current: ToolActivity[], next: ToolActivity): ToolActivi
     : item);
 }
 
+function appendLiveCode(activities: ToolActivity[], name: string, delta: string, path: string): ToolActivity[] {
+  const index = findLastActivity(activities, (item) => item.name === name && item.status === "running");
+  if (index < 0) return activities;
+  return activities.map((item, i) => {
+    if (i !== index) return item;
+    const meta = item.metadata ?? {};
+    const code = (typeof meta.code === "string" ? meta.code : "") + delta;
+    return { ...item, metadata: { ...meta, code, path: (typeof meta.path === "string" && meta.path) || path, live: true } };
+  });
+}
+
+function appendLiveCodeInSegments(segments: TurnSegment[] | undefined, name: string, delta: string, path: string): TurnSegment[] | undefined {
+  if (!segments) return segments;
+  for (let index = segments.length - 1; index >= 0; index -= 1) {
+    const segment = segments[index];
+    if (segment.kind !== "tools") continue;
+    if (!segment.activities.some((item) => item.name === name && item.status === "running")) continue;
+    return segments.map((item, i) => (
+      i === index && item.kind === "tools"
+        ? { kind: "tools", activities: appendLiveCode(item.activities, name, delta, path) }
+        : item
+    ));
+  }
+  return segments;
+}
+
 function appendTextSegment(segments: TurnSegment[] | undefined, delta: string): TurnSegment[] {
   const current = segments ?? [];
   const last = current[current.length - 1];
@@ -3188,10 +3249,15 @@ const DIFF_LINE_CLASS = (line: string): string => {
 
 /** A unified diff (or plain code) rendered line-by-line so additions and
  * deletions are coloured. Wide content scrolls inside the block. */
-function DiffView({ text, kind = "diff" }: { text: string; kind?: "diff" | "code" }) {
+function DiffView({ text, kind = "diff", follow = false }: { text: string; kind?: "diff" | "code"; follow?: boolean }) {
   const lines = text.replace(/\n$/, "").split("\n");
+  const ref = useRef<HTMLPreElement>(null);
+  useEffect(() => {
+    // Keep the newest line in view while code is being typed.
+    if (follow && ref.current) ref.current.scrollTop = ref.current.scrollHeight;
+  }, [text, follow]);
   return (
-    <pre className={`code-change ${kind}`}>
+    <pre className={`code-change ${kind}`} ref={ref}>
       {lines.map((line, index) => (
         <span key={index} className={kind === "diff" ? DIFF_LINE_CLASS(line) : "diff-ctx"}>{line || " "}{"\n"}</span>
       ))}
@@ -3228,7 +3294,7 @@ function ToolCallDetail({ call, showHeader }: { call: ToolActivity; showHeader: 
       )}
       {isWrite && diff && <DiffView text={diff} kind="diff" />}
       {isWrite && !diff && content && <DiffView text={content} kind="code" />}
-      {isWrite && !diff && !content && pendingCode && <DiffView text={pendingCode} kind="code" />}
+      {isWrite && !diff && !content && pendingCode && <DiffView text={pendingCode} kind="code" follow={call.status === "running"} />}
       {!isWrite && command && <DiffView text={`$ ${command}`} kind="code" />}
       {!isWrite && !command && call.argsPreview && <code className="tool-args">{call.argsPreview}</code>}
       {!isWrite && call.outputPreview && <pre className="tool-output">{call.outputPreview}</pre>}
