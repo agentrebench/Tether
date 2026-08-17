@@ -1,0 +1,7 @@
+# A bundle: one command that loads several skills together.
+name: Fix and Ship
+description: Debug a problem methodically, then commit and open a PR the right way.
+skills:
+  - systematic-debugging
+  - pr-workflow
+platforms: [macos, linux]

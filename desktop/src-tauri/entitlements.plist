@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!--
+  Hardened-runtime entitlements for the notarized Tether.app.
+  WKWebView's JIT lives in Apple's own WebContent process and the Python
+  bridge is spawned as an ordinary child process, so no exceptions are
+  required today. Add keys here (e.g. com.apple.security.cs.allow-jit) only
+  if a future native dependency needs them — each one weakens the runtime.
+-->
+<dict/>
+</plist>

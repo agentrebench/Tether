@@ -1,0 +1,38 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+*.egg-info/
+build/
+dist/
+.build/
+*.dmg
+node_modules/
+target/
+desktop/src-tauri/gen/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+.agents/
+.codex/
+
+# Local-only config (real API keys live here; commit config.json.example instead)
+config/config.json
+.env
+.env.*
+!.env.example
+
+# Nested repos / local builds
+llama.cpp/
+
+# Local agent-tooling state
+.claude/

@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Tether — seed ~/.tether/config.json from the bundled copy in this repo.
+#
+# Idempotent. By default, refuses to overwrite an existing ~/.tether/config.json;
+# pass --force to replace.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(dirname "$SCRIPT_DIR")"
+# Prefer a local config.json (gitignored, may hold real keys); fall back to
+# the tracked config.json.example, which ships with empty api_key fields.
+SRC="$REPO_DIR/config/config.json"
+if [[ ! -f "$SRC" ]]; then
+    SRC="$REPO_DIR/config/config.json.example"
+fi
+DST_DIR="$HOME/.tether"
+DST="$DST_DIR/config.json"
+
+FORCE=0
+if [[ "${1:-}" == "--force" || "${1:-}" == "-f" ]]; then
+    FORCE=1
+fi
+
+if [[ ! -f "$SRC" ]]; then
+    echo "error: no config/config.json or config/config.json.example found — are you running this from inside the tether repo?" >&2
+    exit 1
+fi
+
+mkdir -p "$DST_DIR"
+
+if [[ -f "$DST" && $FORCE -eq 0 ]]; then
+    echo "skip $DST already exists — use --force to overwrite"
+    exit 0
+fi
+
+cp "$SRC" "$DST"
+chmod 600 "$DST"
+echo "wrote $DST (mode 0600) from ${SRC#$REPO_DIR/}"
+if [[ "$SRC" == *.example ]]; then
+    echo "note: this is the sanitized template — add your API keys to $DST"
+    echo "      (or export them via the api_key_env vars, e.g. \$DEEPSEEK_API_KEY)"
+fi
+echo
+echo "Done. Run:  tether start"

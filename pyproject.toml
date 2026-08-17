@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tether"
+version = "0.3.0"
+description = "Local-first, model-flexible AI coding agent"
+requires-python = ">=3.10"
+license = "MIT"
+dependencies = [
+    "prompt_toolkit>=3.0",
+    "pygments>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+tether = "tether.cli:main"
+
+# The repo root *is* the `tether` package: it has __init__.py and the
+# subpackages live as plain subdirectories. Map the package name to "."
+# so `pip install -e .` from a fresh clone works without a src/ shim.
+[tool.setuptools.package-data]
+# Ship the built-in SKILL.md docs (they live outside any package dir).
+tether = ["skills_builtin/*/SKILL.md", "skills_builtin/*/*"]
+
+[tool.setuptools]
+package-dir = {"tether" = "."}
+packages = [
+    "tether",
+    "tether.agents",
+    "tether.core",
+    "tether.core.codebase_model",
+    "tether.engine",
+    "tether.session",
+    "tether.tools",
+    "tether.ui",
+]
