@@ -1561,6 +1561,7 @@ class QueryEngine:
             tool_name=tc.name,
             tool_call_id=tc.id,
             tool_args_preview=self._format_args_preview(tc.arguments),
+            metadata=self._pending_code_metadata(tc),
         ))
         cancel_event = getattr(self, "_cancel_event", None)
         if cancel_event is not None and cancel_event.is_set():
@@ -2614,6 +2615,25 @@ class QueryEngine:
                     suggestions.append(f"Frequent tool usage detected: {most_common[0][0]} ({most_common[0][1]} times). Consider batching operations.")
         
         return suggestions
+
+    @staticmethod
+    def _pending_code_metadata(tc) -> dict:
+        """For write-ish calls, the code about to be written — so the desktop
+        can show it the moment the call starts, before the result lands."""
+        args = tc.arguments if isinstance(tc.arguments, dict) else {}
+        if tc.name == "file_write":
+            return {"path": str(args.get("file_path", "")), "code": str(args.get("content", ""))[:40_000],
+                    "operation": "write"}
+        if tc.name == "file_edit":
+            new = args.get("new_string")
+            if new is None:
+                edits = args.get("edits")
+                new = "\n".join(str(e.get("new_string", "")) for e in edits if isinstance(e, dict)) if isinstance(edits, list) else ""
+            return {"path": str(args.get("file_path", "")), "code": str(new or "")[:40_000],
+                    "old_code": str(args.get("old_string") or "")[:40_000], "operation": "edit"}
+        if tc.name == "bash":
+            return {"command": str(args.get("command", ""))[:4_000]}
+        return {}
 
     @staticmethod
     def _format_args_preview(args: dict) -> str:

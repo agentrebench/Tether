@@ -210,6 +210,10 @@ class FileEditTool(BaseTool):
                     "path": str(path),
                     "operation": operation.mode,
                     "summary": operation.summary,
+                    # For the desktop's diff view: a longer unified diff than
+                    # the model-facing preview, still bounded.
+                    "diff": self._diff_for_ui(original, updated, file_path),
+                    "added": sum(1 for l in updated.splitlines()) - sum(1 for l in original.splitlines()),
                 },
             )
         except Exception as exc:
@@ -398,6 +402,18 @@ class FileEditTool(BaseTool):
             if not pieces[-1].endswith("\n"):
                 pieces[-1] = pieces[-1] + "\n"
         return pieces
+
+    @staticmethod
+    def _diff_for_ui(original: str, updated: str, file_path: str,
+                     max_lines: int = 400, max_chars: int = 40_000) -> str:
+        lines = list(unified_diff(
+            original.splitlines(), updated.splitlines(),
+            fromfile=f"a/{file_path}", tofile=f"b/{file_path}", lineterm="", n=3,
+        ))
+        if len(lines) > max_lines:
+            lines = lines[:max_lines] + [f"... ({len(lines) - max_lines} more diff lines)"]
+        text = "\n".join(lines)
+        return text if len(text) <= max_chars else text[:max_chars] + "\n... (truncated)"
 
     def _diff_preview(self, original: str, updated: str, file_path: str) -> str:
         diff_lines = list(

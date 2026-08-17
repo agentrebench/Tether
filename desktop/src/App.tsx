@@ -2791,6 +2791,9 @@ interface AggregatedToolActivity extends Omit<ToolActivity, "narration"> {
   /** What the model said right before each of these calls, in order. Shown
    * only when the card is expanded. */
   narration: string[];
+  /** Every individual call folded into this card, in order — the expanded
+   * view renders each (diffs for edits, commands for bash, …). */
+  calls: ToolActivity[];
 }
 
 function aggregateToolActivities(activities: ToolActivity[]): AggregatedToolActivity[] {
@@ -2800,7 +2803,7 @@ function aggregateToolActivities(activities: ToolActivity[]): AggregatedToolActi
     const note = activity.narration?.trim();
     const { narration: _ignored, ...plain } = activity;
     if (!current) {
-      aggregated.set(activity.name, { ...plain, count: 1, narration: note ? [note] : [] });
+      aggregated.set(activity.name, { ...plain, count: 1, narration: note ? [note] : [], calls: [plain] });
       continue;
     }
     const narration = note && !current.narration.includes(note) ? [...current.narration, note] : current.narration;
@@ -2814,6 +2817,7 @@ function aggregateToolActivities(activities: ToolActivity[]): AggregatedToolActi
       ...plain,
       status,
       narration,
+      calls: [...current.calls, plain],
       count: current.count + 1,
       argsPreview: activity.argsPreview || current.argsPreview,
       outputPreview: activity.outputPreview || current.outputPreview,
@@ -2903,6 +2907,7 @@ const MessageView = memo(function MessageView({
         activity={{ ...activity, narration: undefined }}
         count={activity.count}
         narration={activity.narration}
+        calls={activity.calls}
         description={conciseToolDescription(activity.name, toolDescriptions)}
       />
     ));
@@ -3172,27 +3177,97 @@ function WorkspacePanel({
   );
 }
 
+const DIFF_LINE_CLASS = (line: string): string => {
+  if (line.startsWith("+++") || line.startsWith("---")) return "diff-file";
+  if (line.startsWith("@@")) return "diff-hunk";
+  if (line.startsWith("+")) return "diff-add";
+  if (line.startsWith("-")) return "diff-del";
+  if (line.startsWith("...")) return "diff-meta";
+  return "diff-ctx";
+};
+
+/** A unified diff (or plain code) rendered line-by-line so additions and
+ * deletions are coloured. Wide content scrolls inside the block. */
+function DiffView({ text, kind = "diff" }: { text: string; kind?: "diff" | "code" }) {
+  const lines = text.replace(/\n$/, "").split("\n");
+  return (
+    <pre className={`code-change ${kind}`}>
+      {lines.map((line, index) => (
+        <span key={index} className={kind === "diff" ? DIFF_LINE_CLASS(line) : "diff-ctx"}>{line || " "}{"\n"}</span>
+      ))}
+    </pre>
+  );
+}
+
+function shortPath(path: string): string {
+  const parts = path.split("/").filter(Boolean);
+  return parts.length > 3 ? `…/${parts.slice(-3).join("/")}` : path;
+}
+
+/** One call inside an aggregated card: edits and writes get a real diff (or
+ * the new file's content, or the code being written while the call runs),
+ * bash gets its command and output, everything else args + output. */
+function ToolCallDetail({ call, showHeader }: { call: ToolActivity; showHeader: boolean }) {
+  const meta = call.metadata ?? {};
+  const path = typeof meta.path === "string" ? meta.path : "";
+  const diff = typeof meta.diff === "string" ? meta.diff : "";
+  const content = typeof meta.content === "string" ? meta.content : "";
+  const pendingCode = typeof meta.code === "string" ? meta.code : "";
+  const command = typeof meta.command === "string" ? meta.command : "";
+  const isWrite = call.name === "file_edit" || call.name === "file_write";
+  const opLabel = typeof meta.operation === "string" ? meta.operation : "";
+  const summary = typeof meta.summary === "string" ? meta.summary : "";
+  return (
+    <div className={`tool-call ${call.status}`}>
+      {showHeader && (
+        <div className="tool-call-head">
+          <span className="tool-status" />
+          {isWrite && path ? <code title={path}>{shortPath(path)}</code> : <code>{call.argsPreview || call.name}</code>}
+          <small>{opLabel}{summary ? ` · ${summary}` : ""}{call.status === "running" ? " · writing…" : ""}</small>
+        </div>
+      )}
+      {isWrite && diff && <DiffView text={diff} kind="diff" />}
+      {isWrite && !diff && content && <DiffView text={content} kind="code" />}
+      {isWrite && !diff && !content && pendingCode && <DiffView text={pendingCode} kind="code" />}
+      {!isWrite && command && <DiffView text={`$ ${command}`} kind="code" />}
+      {!isWrite && !command && call.argsPreview && <code className="tool-args">{call.argsPreview}</code>}
+      {!isWrite && call.outputPreview && <pre className="tool-output">{call.outputPreview}</pre>}
+      {call.errorCode && <small className="tool-error">{call.errorCode}</small>}
+    </div>
+  );
+}
+
 function ToolActivityView({
   activity,
   count,
   description,
   narration = [],
+  calls,
 }: {
   activity: ToolActivity;
   count: number;
   description?: string;
   narration?: string[];
+  calls?: ToolActivity[];
 }) {
   const label = activity.name.replaceAll("_", " ");
   const blurb = description ?? conciseToolDescription(activity.name, {});
+  const detailCalls = calls && calls.length > 0 ? calls : [activity];
+  const isWrite = activity.name === "file_edit" || activity.name === "file_write";
+  const touched = isWrite
+    ? [...new Set(detailCalls.map((c) => (typeof c.metadata?.path === "string" ? shortPath(c.metadata.path as string) : "")).filter(Boolean))]
+    : [];
   return (
-    <details className={`tool-activity ${activity.status}`} open={activity.status === "failed"}>
+    <details className={`tool-activity ${activity.status}`} open={activity.status === "failed" || (isWrite && activity.status === "running")}>
       <summary>
         <span className="tool-status" />
-        <strong>{label}{count > 1 && <b className="tool-count">×{count}</b>}</strong>
+        <strong>
+          {label}{count > 1 && <b className="tool-count">×{count}</b>}
+          {touched.length > 0 && <em className="tool-files">{touched.slice(0, 3).join(", ")}{touched.length > 3 ? ` +${touched.length - 3}` : ""}</em>}
+        </strong>
         <small>{activity.status === "running" ? "running" : activity.status}</small>
       </summary>
-      {(blurb || narration.length > 0 || activity.argsPreview || activity.outputPreview || activity.errorCode) && (
+      {(blurb || narration.length > 0 || detailCalls.length > 0) && (
         <div className="tool-activity-body">
           <p>{blurb}</p>
           {narration.length > 0 && (
@@ -3200,9 +3275,11 @@ function ToolActivityView({
               {narration.map((line, index) => <li key={index}>{line}</li>)}
             </ul>
           )}
-          {activity.argsPreview && <code>{activity.argsPreview}</code>}
-          {activity.outputPreview && <pre>{activity.outputPreview}</pre>}
-          {activity.errorCode && <small>{activity.errorCode}</small>}
+          <div className="tool-calls">
+            {detailCalls.map((call, index) => (
+              <ToolCallDetail key={call.id || index} call={call} showHeader={detailCalls.length > 1 || isWrite} />
+            ))}
+          </div>
         </div>
       )}
     </details>

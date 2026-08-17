@@ -318,6 +318,29 @@ button { color: inherit; }
 .tool-activity summary strong { font-size: 11px; font-weight: 600; text-transform: lowercase; }
 .tool-count { display: inline-flex; align-items: center; min-height: 15px; margin-left: 6px; padding: 1px 5px; border-radius: 999px; background: var(--purple-soft); color: var(--purple-bright); font-size: 10px; font-weight: 750; }
 .tool-activity summary small { color: var(--muted-2); font-size: 10px; }
+.tool-activity summary strong { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.tool-files { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-style: normal; font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; text-transform: none; }
+.tool-calls { display: flex; flex-direction: column; gap: 8px; }
+.tool-call { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.tool-call-head { display: grid; grid-template-columns: 6px minmax(0,auto) minmax(0,1fr); gap: 8px; align-items: center; }
+.tool-call-head code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font-size: 11px; }
+.tool-call-head small { color: var(--muted-2); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tool-call.running .tool-status { background: var(--purple); animation: pulse 1s infinite; }
+.tool-call.failed .tool-status { background: var(--red); }
+.tool-args { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 10px; }
+.tool-output { max-height: 180px; margin: 0; padding: 9px; white-space: pre-wrap; overflow-wrap: anywhere; color: #bbb6c7; font-size: 10px; line-height: 1.45; }
+.tool-error { color: var(--red); font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.code-change { max-height: 360px; margin: 0; padding: 8px 10px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; background: #0b0b11; color: #cfcbdc; font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre; tab-size: 4; }
+.code-change span { display: block; padding: 0 4px; margin: 0 -4px; }
+.code-change .diff-add { background: rgba(168,255,22,.10); color: #d8ffa6; }
+.code-change .diff-del { background: rgba(255,90,90,.12); color: #ffb3b3; }
+.code-change .diff-hunk { color: var(--purple-bright); }
+.code-change .diff-file { color: var(--muted); }
+.code-change .diff-meta { color: var(--muted-2); font-style: italic; }
+:root[data-theme="light"] .code-change { background: #f6f5fa; color: #2a2734; }
+:root[data-theme="light"] .code-change .diff-add { background: rgba(60,160,20,.12); color: #1f5d0a; }
+:root[data-theme="light"] .code-change .diff-del { background: rgba(200,40,40,.10); color: #8b1e1e; }
+:root[data-theme="light"] .tool-output { color: #625c6c; }
 .tool-status { width: 6px; height: 6px; border-radius: 999px; background: var(--green); }
 .tool-activity.running .tool-status { background: var(--purple); animation: pulse 1s infinite; }
 .tool-activity.failed .tool-status { background: var(--red); }.tool-activity.failed summary small { color: var(--red); }
