@@ -308,8 +308,6 @@ button { color: inherit; }
 .message.assistant .message-content:empty::after { content: ""; display: block; width: 7px; height: 13px; margin-top: 7px; border-radius: 2px; background: var(--purple); animation: pulse 1s infinite; }
 
 .tool-activities { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
-/* The model's between-tool narration ("Now let me read…") lives inside the tool stack as a quiet caption, not as prose. */
-.tool-narration { margin: 4px 2px 0; color: var(--muted); font-size: 12px; line-height: 1.45; }
 /* Prose that follows a tool batch (the final answer, or interstitial text) needs the same breathing room. */
 .tool-activities + * { margin-top: 12px; }
 .tool-activity { overflow: hidden; border: 1px solid var(--line); border-radius: 8px; background: rgba(255,255,255,.018); }
@@ -324,6 +322,8 @@ button { color: inherit; }
 .tool-activity.failed .tool-status { background: var(--red); }.tool-activity.failed summary small { color: var(--red); }
 .tool-activity-body { display: flex; flex-direction: column; gap: 7px; padding: 0 9px 9px 24px; }
 .tool-activity-body p { margin: 0; color: var(--muted); font-size: 10px; line-height: 1.45; }
+.tool-narration { margin: 0; padding-left: 14px; display: flex; flex-direction: column; gap: 4px; color: var(--text); font-size: 12px; line-height: 1.5; }
+.tool-narration li { white-space: pre-wrap; }
 .tool-activity-body > code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 10px; }
 .tool-activity-body pre { max-height: 180px; margin: 0; padding: 9px; white-space: pre-wrap; overflow-wrap: anywhere; color: #bbb6c7; font-size: 10px; line-height: 1.45; }
 .tool-activity-body > small { color: var(--red); font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }

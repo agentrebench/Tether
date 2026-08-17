@@ -2513,18 +2513,24 @@ const MarkdownView = memo(function MarkdownView({
   return <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>{text}</ReactMarkdown>;
 });
 
-interface AggregatedToolActivity extends ToolActivity {
+interface AggregatedToolActivity extends Omit<ToolActivity, "narration"> {
   count: number;
+  /** What the model said right before each of these calls, in order. Shown
+   * only when the card is expanded. */
+  narration: string[];
 }
 
 function aggregateToolActivities(activities: ToolActivity[]): AggregatedToolActivity[] {
   const aggregated = new Map<string, AggregatedToolActivity>();
   for (const activity of activities) {
     const current = aggregated.get(activity.name);
+    const note = activity.narration?.trim();
+    const { narration: _ignored, ...plain } = activity;
     if (!current) {
-      aggregated.set(activity.name, { ...activity, count: 1 });
+      aggregated.set(activity.name, { ...plain, count: 1, narration: note ? [note] : [] });
       continue;
     }
+    const narration = note && !current.narration.includes(note) ? [...current.narration, note] : current.narration;
     const status = current.status === "failed" || activity.status === "failed"
       ? "failed"
       : current.status === "running" || activity.status === "running"
@@ -2532,8 +2538,9 @@ function aggregateToolActivities(activities: ToolActivity[]): AggregatedToolActi
         : "completed";
     aggregated.set(activity.name, {
       ...current,
-      ...activity,
+      ...plain,
       status,
+      narration,
       count: current.count + 1,
       argsPreview: activity.argsPreview || current.argsPreview,
       outputPreview: activity.outputPreview || current.outputPreview,
@@ -2620,8 +2627,9 @@ const MessageView = memo(function MessageView({
     return aggregated.map((activity) => (
       <ToolActivityView
         key={`${keyPrefix}-${activity.name}`}
-        activity={activity}
+        activity={{ ...activity, narration: undefined }}
         count={activity.count}
+        narration={activity.narration}
         description={conciseToolDescription(activity.name, toolDescriptions)}
       />
     ));
@@ -2655,13 +2663,24 @@ const MessageView = memo(function MessageView({
     const opening = list.slice(0, openingEnd);
     const middle = list.slice(openingEnd, lastTools + 1);
     const closing = list.slice(lastTools + 1);
-    const stack = middle.flatMap((segment, offset) => (
-      segment.kind === "tools"
-        ? renderToolCards(segment.activities, `tools-${firstTools + offset}`)
-        : segment.text.trim()
-          ? [<p className="tool-narration" key={`narration-${firstTools + offset}`}>{segment.text.trim()}</p>]
-          : []
-    ));
+    // Every tool call after the opening is folded into ONE aggregated block
+    // (bash ×5, file read ×3 …) that keeps growing while the turn runs. The
+    // model's between-tool narration is not rendered here; the activity row
+    // already says what is running.
+    let pendingNarration = "";
+    const middleActivities: ToolActivity[] = [];
+    for (const segment of middle) {
+      if (segment.kind === "text") {
+        pendingNarration = [pendingNarration, segment.text.trim()].filter(Boolean).join("\n");
+        continue;
+      }
+      segment.activities.forEach((activity, index) => {
+        // The narration belongs to the first call of the batch it introduced.
+        middleActivities.push(index === 0 && pendingNarration ? { ...activity, narration: pendingNarration } : activity);
+      });
+      pendingNarration = "";
+    }
+    const stack = renderToolCards(middleActivities, "tool-stack");
     return [
       ...opening.map((segment, index) => (
         segment.kind === "text"
@@ -2860,10 +2879,12 @@ function ToolActivityView({
   activity,
   count,
   description,
+  narration = [],
 }: {
   activity: ToolActivity;
   count: number;
   description?: string;
+  narration?: string[];
 }) {
   const label = activity.name.replaceAll("_", " ");
   const blurb = description ?? conciseToolDescription(activity.name, {});
@@ -2874,9 +2895,14 @@ function ToolActivityView({
         <strong>{label}{count > 1 && <b className="tool-count">×{count}</b>}</strong>
         <small>{activity.status === "running" ? "running" : activity.status}</small>
       </summary>
-      {(blurb || activity.argsPreview || activity.outputPreview || activity.errorCode) && (
+      {(blurb || narration.length > 0 || activity.argsPreview || activity.outputPreview || activity.errorCode) && (
         <div className="tool-activity-body">
           <p>{blurb}</p>
+          {narration.length > 0 && (
+            <ul className="tool-narration" aria-label="What the model said before these calls">
+              {narration.map((line, index) => <li key={index}>{line}</li>)}
+            </ul>
+          )}
           {activity.argsPreview && <code>{activity.argsPreview}</code>}
           {activity.outputPreview && <pre>{activity.outputPreview}</pre>}
           {activity.errorCode && <small>{activity.errorCode}</small>}

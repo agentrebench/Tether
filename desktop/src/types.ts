@@ -37,6 +37,8 @@ export interface ToolActivity {
   displayKind: string;
   errorCode: string;
   metadata: Record<string, unknown>;
+  /** Prose the model wrote immediately before this call (desktop-only, derived). */
+  narration?: string;
 }
 
 export type AgentStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
