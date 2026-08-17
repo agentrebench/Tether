@@ -92,6 +92,7 @@ const ONBOARDING_STORAGE_KEY = "tether.onboarding.v1";
 const PREVIEW_WIDTH_STORAGE_KEY = "tether.previewWidth";
 const PREVIEW_MIN_WIDTH = 300;
 const STREAM_FLUSH_INTERVAL_MS = 40;
+const OPENING_STATEMENT_MAX_CHARS = 280;
 const PREVIEW_DIVIDER_WIDTH = 6;
 type Theme = "light" | "dark";
 
@@ -2927,11 +2928,19 @@ const MessageView = memo(function MessageView({
     }
     let lastTools = -1;
     list.forEach((segment, index) => { if (segment.kind === "tools") lastTools = index; });
-    // The model's FIRST prose is its opening statement no matter what ran
-    // before it (turns often begin with an automatic model_query/bash), so it
-    // renders full-size; only prose between LATER tool batches is narration.
+    // Prose written BEFORE any tool call is the opening statement. If tools ran
+    // first (turns often begin with an automatic model_query/bash), the model's
+    // first prose still counts as the opening only when it is a short intent
+    // line ("I'll review the core files — reading X, Y, Z."); a long first
+    // text after tools is reasoning/narration and belongs inside the tool
+    // cards, not in the reader's face.
     const firstText = list.findIndex((segment) => segment.kind === "text" && segment.text.trim());
-    const openingEnd = firstText >= 0 && firstText < lastTools ? firstText + 1 : firstTools;
+    const firstTextIsShort = firstText >= 0
+      && list[firstText].kind === "text"
+      && (list[firstText] as { kind: "text"; text: string }).text.trim().length <= OPENING_STATEMENT_MAX_CHARS;
+    const openingEnd = firstText >= 0 && firstText < lastTools && (firstText < firstTools || firstTextIsShort)
+      ? firstText + 1
+      : firstTools;
     const opening = list.slice(0, openingEnd);
     const middle = list.slice(openingEnd, lastTools + 1);
     const closing = list.slice(lastTools + 1);
