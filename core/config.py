@@ -1,9 +1,14 @@
 """Tether configuration."""
 from __future__ import annotations
 
+import copy
 import json
 import os
+import re
 import stat
+import threading
+import time
+import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -193,7 +198,7 @@ REMOTE_PROVIDERS = {
         "label": "GLM",
         "description": "Z.AI GLM coding and agent models.",
         "api_base_url": "https://api.z.ai/api/paas/v4",
-        "api_model": "glm-5.1",
+        "api_model": "glm-5.3",
         "api_key_env": "ZAI_API_KEY",
         "api_key_env_aliases": ["GLM_API_KEY"],
         "context_size": 202_752,
@@ -201,9 +206,25 @@ REMOTE_PROVIDERS = {
         "requires_api_key": True,
         "models": [
             {
+                "id": "glm-5.3",
+                "label": "GLM-5.3",
+                "description": "Newest flagship agent model",
+                "context_size": 202_752,
+                "thinking_modes": ["enabled", "disabled"],
+                "default_thinking_mode": "enabled",
+            },
+            {
+                "id": "glm-5.2",
+                "label": "GLM-5.2",
+                "description": "Flagship agent model",
+                "context_size": 202_752,
+                "thinking_modes": ["enabled", "disabled"],
+                "default_thinking_mode": "enabled",
+            },
+            {
                 "id": "glm-5.1",
                 "label": "GLM-5.1",
-                "description": "Newest flagship agent model",
+                "description": "Flagship agent model",
                 "context_size": 202_752,
                 "thinking_modes": ["enabled", "disabled"],
                 "default_thinking_mode": "enabled",
@@ -246,6 +267,7 @@ REMOTE_PROVIDERS = {
         "label": "Anthropic",
         "description": "Claude through Anthropic's OpenAI compatibility API.",
         "api_base_url": "https://api.anthropic.com/v1",
+        "models_auth": "anthropic",  # /v1/models wants x-api-key, not Bearer
         "api_model": "claude-opus-5",
         "api_key_env": "ANTHROPIC_API_KEY",
         "context_size": 1_000_000,
@@ -269,13 +291,186 @@ REMOTE_PROVIDERS = {
 }
 
 
-def provider_model(provider: str, model_id: str) -> dict | None:
-    """Return model metadata from the built-in catalog."""
+# Live model discovery -------------------------------------------------------
+#
+# The built-in catalog above is a snapshot and goes stale the day a provider
+# ships a new model. Providers that speak the OpenAI-compatible ``GET /models``
+# are asked what they actually serve; ids the catalog does not know are
+# synthesized from the preset's default model so they can be selected with
+# sensible reasoning/thinking controls. Results are cached per process.
+_DISCOVERY_TTL_SECONDS = 600
+_discovered_models: dict[str, tuple[float, list[str]]] = {}
+_discovery_lock = threading.Lock()
+
+
+def _models_endpoint(provider: str) -> str:
     preset = REMOTE_PROVIDERS.get(provider, {})
-    return next(
+    if "models_endpoint" in preset and preset.get("models_endpoint") is None:
+        return ""  # explicitly no discovery for this provider
+    explicit = preset.get("models_endpoint")
+    if explicit:
+        return str(explicit)
+    base = str(preset.get("api_base_url", "")).rstrip("/")
+    if not base:
+        return ""
+    # Same rule as the chat-completions URL: honour a versioned base
+    # (…/v4 → …/v4/models), otherwise assume /v1.
+    if re.search(r"/v\d+(?:beta\d*)?$", base):
+        return f"{base}/models"
+    return f"{base}/v1/models"
+
+
+def _discovery_headers(provider: str, key: str) -> dict[str, str]:
+    preset = REMOTE_PROVIDERS.get(provider, {})
+    if preset.get("models_auth") == "anthropic":
+        return {"x-api-key": key, "anthropic-version": "2023-06-01", "Accept": "application/json"}
+    return {"Authorization": f"Bearer {key}", "Accept": "application/json"}
+
+
+# Ids that are real but not chat/agent models (embeddings, speech, image,
+# dated snapshots, legacy families). Everything else is kept, so a brand-new
+# name the catalog has never heard of still shows up.
+_DISCOVERY_EXCLUDE = {
+    "openai": re.compile(
+        r"(embedding|tts|whisper|transcribe|realtime|audio|image|dall-e|moderation|"
+        r"davinci|babbage|instruct|search-preview|codex|computer-use|sora|omni-)"
+        r"|-\d{4}-\d{2}-\d{2}$|-\d{4}$",
+        re.IGNORECASE,
+    ),
+    "kimi": re.compile(r"^moonshot-v1|vision"),
+}
+
+
+def _discovery_key(config: "TetherConfig", provider: str) -> str:
+    for env_name in config.api_key_env_names(provider):
+        value = os.environ.get(env_name, "").strip()
+        if value:
+            return value
+    return config.stored_api_key(provider)
+
+
+def discover_provider_models(
+    config: "TetherConfig",
+    provider: str,
+    *,
+    timeout: float = 4.0,
+    force: bool = False,
+) -> list[str]:
+    """Return live model ids for ``provider`` (cached), or [] when unavailable.
+
+    Never raises: network errors, auth failures, and unexpected shapes all
+    degrade to an empty list so the built-in catalog is still usable offline.
+    """
+    endpoint = _models_endpoint(provider)
+    if not endpoint or provider not in REMOTE_PROVIDERS:
+        return []
+    now = time.monotonic()
+    with _discovery_lock:
+        cached = _discovered_models.get(provider)
+        if cached and not force and now - cached[0] < _DISCOVERY_TTL_SECONDS:
+            return list(cached[1])
+    key = _discovery_key(config, provider)
+    if not key and REMOTE_PROVIDERS[provider].get("requires_api_key", True):
+        return []
+    ids: list[str] = []
+    exclude = _DISCOVERY_EXCLUDE.get(provider)
+    try:
+        req = urllib.request.Request(endpoint, headers=_discovery_headers(provider, key))
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+        rows = data.get("data") if isinstance(data, dict) else data
+        if isinstance(rows, list):
+            for row in rows:
+                model_id = row.get("id") if isinstance(row, dict) else None
+                if not isinstance(model_id, str) or not model_id.strip():
+                    continue
+                model_id = model_id.strip()
+                if exclude is not None and exclude.search(model_id):
+                    continue
+                ids.append(model_id)
+    except Exception:
+        ids = []
+    with _discovery_lock:
+        # Cache failures too (briefly) so a dead endpoint is not re-hit on
+        # every catalog build; a later force refresh will retry.
+        _discovered_models[provider] = (now, ids)
+    return list(ids)
+
+
+def _synthesized_model(provider: str, model_id: str) -> dict:
+    """Build a catalog entry for a live-discovered id from the preset's default."""
+    preset = REMOTE_PROVIDERS.get(provider, {})
+    template = next(
+        (m for m in preset.get("models", []) if m.get("id") == preset.get("api_model")),
+        (preset.get("models") or [{}])[0],
+    )
+    entry = {
+        key: copy.deepcopy(value)
+        for key, value in template.items()
+        if key in {
+            "context_size", "reasoning_efforts", "default_reasoning_effort",
+            "thinking_modes", "default_thinking_mode", "thinking_mode",
+            "max_tokens_field", "omit_sampling",
+        }
+    }
+    entry.update({
+        "id": model_id,
+        "label": model_id,
+        "description": "Reported by the provider API",
+        "discovered": True,
+    })
+    entry.setdefault("context_size", preset.get("context_size", DEFAULT_CONTEXT_SIZE))
+    return entry
+
+
+def provider_models(provider: str, config: "TetherConfig | None" = None) -> list[dict]:
+    """Catalog models for ``provider``, with live-discovered ids merged in.
+
+    Discovered ids the catalog does not list are placed first (they are
+    almost always the newest releases). Pass ``config`` to enable discovery;
+    without it this is the static catalog.
+    """
+    preset = REMOTE_PROVIDERS.get(provider, {})
+    known = copy.deepcopy(preset.get("models", []))
+    if config is None:
+        return known
+    known_ids = {m.get("id") for m in known}
+    extra = [
+        _synthesized_model(provider, model_id)
+        for model_id in discover_provider_models(config, provider)
+        if model_id not in known_ids
+    ]
+    merged = extra + known
+    # Newest first across catalog and discovered ids alike (stable, so the
+    # curated catalog order breaks ties).
+    merged.sort(key=lambda m: _version_sort_key(str(m.get("id", ""))), reverse=True)
+    return merged
+
+
+def _version_sort_key(model_id: str) -> tuple:
+    parts = re.split(r"[-._]", model_id)
+    key = []
+    for part in parts:
+        key.append((1, int(part), "") if part.isdigit() else (0, 0, part))
+    # Terminal marker so a base id ("gpt-5.4") sorts above its variants
+    # ("gpt-5.4-mini") instead of below them.
+    key.append((1, -1, ""))
+    return tuple(key)
+
+
+def provider_model(provider: str, model_id: str, config: "TetherConfig | None" = None) -> dict | None:
+    """Return model metadata from the catalog, or a synthesized entry for an id
+    the provider reports live (only when ``config`` is given for discovery)."""
+    preset = REMOTE_PROVIDERS.get(provider, {})
+    found = next(
         (model for model in preset.get("models", []) if model.get("id") == model_id),
         None,
     )
+    if found is not None or config is None:
+        return found
+    if model_id in discover_provider_models(config, provider):
+        return _synthesized_model(provider, model_id)
+    return None
 
 
 def apply_provider_selection(
@@ -335,7 +530,7 @@ def apply_provider_selection(
     if preset is None:
         raise ValueError(f"Unknown provider: {provider}")
     selected_id = model_id.strip() or str(preset["api_model"])
-    model = provider_model(provider, selected_id)
+    model = provider_model(provider, selected_id, config)
     if model is None:
         raise ValueError(f"Unknown {provider} model: {selected_id}")
     if not config.is_remote and not config.local_context_size:

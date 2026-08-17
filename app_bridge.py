@@ -34,6 +34,7 @@ from .core.config import (
     REMOTE_PROVIDERS,
     TetherConfig,
     apply_provider_selection,
+    provider_models,
 )
 from .core.models import StreamEvent
 from .core.permissions import APPROVAL_DENIED_SIGNAL, PermissionContext
@@ -155,8 +156,13 @@ def _local_models(config: TetherConfig) -> list[dict[str, Any]]:
     ]
 
 
-def provider_catalog(config: TetherConfig) -> list[dict[str, Any]]:
-    """Return a secret-free catalog tailored to the current installation."""
+def provider_catalog(config: TetherConfig, *, live: bool = False) -> list[dict[str, Any]]:
+    """Return a secret-free catalog tailored to the current installation.
+
+    ``live=True`` merges each provider's ``/models`` listing (network, cached
+    ~10 min) so newly released models appear without a Tether update; the
+    default is the instant static catalog for the startup handshake.
+    """
     local_models = _local_models(config)
     providers: list[dict[str, Any]] = [{
         "id": "local",
@@ -174,7 +180,7 @@ def provider_catalog(config: TetherConfig) -> list[dict[str, Any]]:
             "requires_api_key": bool(preset.get("requires_api_key", True)),
             "api_key_configured": config.has_api_key(provider_id),
             "api_key_env": preset.get("api_key_env", ""),
-            "models": copy.deepcopy(preset.get("models", [])),
+            "models": provider_models(provider_id, config if live else None),
         })
     providers.append({
         "id": "custom",
@@ -438,6 +444,20 @@ class AppBridgeServer:
         except Exception:
             pass
         return catalog
+
+    def _refresh_provider_catalog_async(self) -> None:
+        """Ask each configured provider what it serves and push the merged
+        catalog as ``providers_updated``. Runs off-thread so the handshake and
+        runtime changes stay instant; the app applies it without touching the
+        open settings sheet."""
+        def worker() -> None:
+            try:
+                providers = provider_catalog(self.config, live=True)
+            except Exception:
+                return
+            self.writer.send({"type": "providers_updated", "providers": providers})
+
+        threading.Thread(target=worker, daemon=True, name="tether-model-discovery").start()
 
     def _status(self) -> dict[str, Any]:
         todos = self.todo_tool.snapshot() if self.todo_tool is not None else self.todo_store.load()
@@ -820,6 +840,8 @@ class AppBridgeServer:
         status = self._status()
         status["type"] = "runtime_configured"
         self.writer.send(status)
+        # A newly stored key may unlock discovery for that provider.
+        self._refresh_provider_catalog_async()
 
     def _configure_session(self, message: dict[str, Any]) -> None:
         """Apply desktop-only continuity and planning settings safely."""
@@ -1400,6 +1422,9 @@ class AppBridgeServer:
 
     def serve(self) -> int:
         self.writer.send(self._status())
+        # Static catalog first (instant); live model discovery follows as
+        # ``providers_updated`` once each configured provider has answered.
+        self._refresh_provider_catalog_async()
         for raw_line in self.input_stream:
             if self._shutdown.is_set():
                 break

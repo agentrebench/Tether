@@ -118,3 +118,70 @@ class LocalToLocalProviderSelection(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LiveModelDiscovery(unittest.TestCase):
+    """Providers' /models listings are merged into the catalog, newest first,
+    and unknown ids become selectable synthesized entries."""
+
+    def setUp(self):
+        from tether.core import config as cfg
+        cfg._discovered_models.clear()
+        self.cfg = cfg
+        self.config = TetherConfig()
+        self.config.api_keys = {"glm": "test-key"}
+
+    def tearDown(self):
+        self.cfg._discovered_models.clear()
+
+    def _patch_urlopen(self, ids):
+        import io, json
+        from unittest import mock
+
+        class _Resp(io.BytesIO):
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        body = json.dumps({"data": [{"id": i} for i in ids]}).encode()
+        return mock.patch.object(self.cfg.urllib.request, "urlopen", return_value=_Resp(body))
+
+    def test_discovered_ids_merge_newest_first_and_are_selectable(self):
+        with self._patch_urlopen(["glm-4.5", "glm-9.0", "glm-5.3"]):
+            models = self.cfg.provider_models("glm", self.config)
+            ids = [m["id"] for m in models]
+            self.assertEqual(ids[0], "glm-9.0")
+            self.assertLess(ids.index("glm-5.3"), ids.index("glm-4.5"))
+            synthesized = self.cfg.provider_model("glm", "glm-9.0", self.config)
+        self.assertIsNotNone(synthesized)
+        self.assertTrue(synthesized["discovered"])
+        self.assertIn("thinking_modes", synthesized)  # inherited from the preset default
+        # And it can actually be applied as the active model.
+        with self._patch_urlopen(["glm-9.0"]):
+            self.cfg._discovered_models.clear()
+            self.cfg.apply_provider_selection(self.config, "glm", "glm-9.0")
+        self.assertEqual(self.config.api_model, "glm-9.0")
+
+    def test_discovery_failure_degrades_to_static_catalog(self):
+        from unittest import mock
+        with mock.patch.object(self.cfg.urllib.request, "urlopen", side_effect=OSError("offline")):
+            ids = [m["id"] for m in self.cfg.provider_models("glm", self.config)]
+        self.assertIn("glm-5.3", ids)
+        self.assertIsNone(self.cfg.provider_model("glm", "glm-9.0", self.config))
+
+    def test_no_key_means_no_network(self):
+        from unittest import mock
+        self.config.api_keys = {}
+        with mock.patch.object(self.cfg.urllib.request, "urlopen") as urlopen:
+            self.assertEqual(self.cfg.discover_provider_models(self.config, "glm"), [])
+            urlopen.assert_not_called()
+
+    def test_openai_filter_drops_non_chat_ids(self):
+        self.config.api_keys = {"openai": "k"}
+        with self._patch_urlopen(["gpt-5.6", "text-embedding-3-large", "gpt-5.5-2026-04-23", "whisper-1", "sol"]):
+            ids = self.cfg.discover_provider_models(self.config, "openai")
+        self.assertEqual(ids, ["gpt-5.6", "sol"])
+
+    def test_version_sort(self):
+        k = self.cfg._version_sort_key
+        order = sorted(["gpt-5.4-mini", "gpt-5.5", "gpt-5.4", "gpt-5.10"], key=k, reverse=True)
+        self.assertEqual(order, ["gpt-5.10", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini"])

@@ -480,7 +480,13 @@ codebase_model_enabled    true      # persistent codebase mental model (/persist
 
 By default Tether auto-approves read and file-edit operations so routine work doesn't get stuck behind repeated confirmation prompts. Shell commands and sub-agent launches still require approval unless you change the config.
 
-When `provider` is anything other than `local`, the engine talks to `api_base_url` using the first configured provider environment variable (or that provider's entry in `api_keys`) instead of the local server. Reasoning effort and thinking controls are validated against the selected built-in model; unsupported sampling fields are omitted automatically.
+When `provider` is anything other than `local`, the engine talks to `api_base_url` using the first configured provider environment variable (or that provider's entry in `api_keys`) instead of the local server. Reasoning effort and thinking controls are validated against the selected model; unsupported sampling fields are omitted automatically.
+
+Model lists are not frozen: once a provider has a key, Tether asks its
+`/models` endpoint what it actually serves and merges new ids into the picker
+(newest first, controls inherited from the provider's default model), so a
+model released after this build still shows up. Offline or without a key you
+get the built-in catalog.
 
 
 How it works

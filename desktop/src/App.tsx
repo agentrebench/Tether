@@ -1085,6 +1085,12 @@ export default function App() {
         break;
       }
 
+      case "providers_updated":
+        // Live model discovery finished (background); refresh the catalog
+        // only — never disturb the open settings sheet or the active model.
+        setProviders(asProviderCatalog(payload.providers));
+        break;
+
       case "runtime_configured":
         applyRuntimePayload(payload);
         setRuntimeSaving(false);

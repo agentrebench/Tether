@@ -1563,8 +1563,8 @@ def cmd_remote(args: argparse.Namespace) -> int:
             config.context_size = preset["context_size"]
         if "max_budget_tokens" in preset:
             config.max_budget_tokens = preset["max_budget_tokens"]
-        known_models = {item.get("id") for item in preset.get("models", [])}
-        if config.api_model in known_models:
+        # Catalog plus whatever the provider reports live (needs a key).
+        if provider_model(target, config.api_model, config) is not None:
             apply_provider_selection(
                 config,
                 target,
@@ -1579,7 +1579,7 @@ def cmd_remote(args: argparse.Namespace) -> int:
 
     # Reasoning effort precedence: explicit flag > preset default > model-name
     # heuristic > off. Pass --reasoning-effort "" to clear it.
-    catalog_model = provider_model(target, config.api_model) if target in REMOTE_PROVIDERS else None
+    catalog_model = provider_model(target, config.api_model, config) if target in REMOTE_PROVIDERS else None
     if args.reasoning_effort is not None:
         config.reasoning_effort = args.reasoning_effort
     elif catalog_model is not None:
