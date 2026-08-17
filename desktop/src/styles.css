@@ -308,6 +308,8 @@ button { color: inherit; }
 .message.assistant .message-content:empty::after { content: ""; display: block; width: 7px; height: 13px; margin-top: 7px; border-radius: 2px; background: var(--purple); animation: pulse 1s infinite; }
 
 .tool-activities { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
+/* The model's between-tool narration ("Now let me read…") lives inside the tool stack as a quiet caption, not as prose. */
+.tool-narration { margin: 4px 2px 0; color: var(--muted); font-size: 12px; line-height: 1.45; }
 /* Prose that follows a tool batch (the final answer, or interstitial text) needs the same breathing room. */
 .tool-activities + * { margin-top: 12px; }
 .tool-activity { overflow: hidden; border: 1px solid var(--line); border-radius: 8px; background: rgba(255,255,255,.018); }

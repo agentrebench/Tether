@@ -2615,33 +2615,68 @@ const MessageView = memo(function MessageView({
   const segments = message.role === "assistant" && message.segments && message.segments.length > 0
     ? message.segments
     : null;
-  const renderToolBlock = (activities: ToolActivity[], key: string) => {
+  const renderToolCards = (activities: ToolActivity[], keyPrefix: string) => {
     const aggregated = aggregateToolActivities(activities.filter(keepActivity));
-    if (aggregated.length === 0) return null;
-    return (
-      <div className="tool-activities" key={key}>
-        {aggregated.map((activity) => (
-          <ToolActivityView
-            key={activity.name}
-            activity={activity}
-            count={activity.count}
-            description={conciseToolDescription(activity.name, toolDescriptions)}
-          />
-        ))}
-      </div>
-    );
+    return aggregated.map((activity) => (
+      <ToolActivityView
+        key={`${keyPrefix}-${activity.name}`}
+        activity={activity}
+        count={activity.count}
+        description={conciseToolDescription(activity.name, toolDescriptions)}
+      />
+    ));
+  };
+  const renderToolBlock = (activities: ToolActivity[], key: string) => {
+    const cards = renderToolCards(activities, key);
+    if (cards.length === 0) return null;
+    return <div className="tool-activities" key={key}>{cards}</div>;
+  };
+  // Shape of a turn: opening prose → ONE stacked block of tool cards (with the
+  // model's in-between narration demoted to small captions inside the stack) →
+  // the final answer, full-size, at the bottom. While still streaming, the
+  // trailing text may yet turn out to be narration; it is promoted/demoted as
+  // soon as the next tool card arrives.
+  const renderSegments = (list: TurnSegment[]) => {
+    const firstTools = list.findIndex((segment) => segment.kind === "tools");
+    if (firstTools < 0) {
+      return list.map((segment, index) => (
+        segment.kind === "text" && segment.text
+          ? <MarkdownView key={`text-${index}`} text={segment.text} onOpenPath={onOpenPath} />
+          : null
+      ));
+    }
+    let lastTools = -1;
+    list.forEach((segment, index) => { if (segment.kind === "tools") lastTools = index; });
+    const opening = list.slice(0, firstTools);
+    const middle = list.slice(firstTools, lastTools + 1);
+    const closing = list.slice(lastTools + 1);
+    const stack = middle.flatMap((segment, offset) => (
+      segment.kind === "tools"
+        ? renderToolCards(segment.activities, `tools-${firstTools + offset}`)
+        : segment.text.trim()
+          ? [<p className="tool-narration" key={`narration-${firstTools + offset}`}>{segment.text.trim()}</p>]
+          : []
+    ));
+    return [
+      ...opening.map((segment, index) => (
+        segment.kind === "text" && segment.text
+          ? <MarkdownView key={`text-${index}`} text={segment.text} onOpenPath={onOpenPath} />
+          : null
+      )),
+      stack.length > 0 ? <div className="tool-activities" key="tool-stack">{stack}</div> : null,
+      ...closing.map((segment, offset) => (
+        segment.kind === "text" && segment.text
+          ? <MarkdownView key={`text-${lastTools + 1 + offset}`} text={segment.text} onOpenPath={onOpenPath} />
+          : null
+      )),
+    ];
   };
   return (
     <article className={`message ${message.role}`}>
       {message.role === "assistant" && <div className="assistant-avatar"><Bot size={17} /></div>}
       <div className="message-content">
         {segments ? (
-          // Chronological: prose → tool cards → more prose → … → final answer.
-          segments.map((segment, index) => (
-            segment.kind === "text"
-              ? (segment.text ? <MarkdownView key={`text-${index}`} text={segment.text} onOpenPath={onOpenPath} /> : null)
-              : renderToolBlock(segment.activities, `tools-${index}`)
-          ))
+          renderSegments(segments)
         ) : message.role === "assistant" ? (
           <MarkdownView text={message.text} onOpenPath={onOpenPath} />
         ) : (
