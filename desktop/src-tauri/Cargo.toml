@@ -1,6 +1,6 @@
 [package]
 name = "tether-desktop"
-version = "0.3.0"
+version = "0.3.1"
 description = "Native desktop console for the Tether coding agent"
 authors = ["Tether"]
 edition = "2021"

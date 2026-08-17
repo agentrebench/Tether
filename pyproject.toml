@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tether"
-version = "0.3.0"
+version = "0.3.1"
 description = "Local-first, model-flexible AI coding agent"
 requires-python = ">=3.10"
 license = "MIT"
