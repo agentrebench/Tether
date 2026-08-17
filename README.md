@@ -10,8 +10,36 @@ to a working theory of your repo, does the task, exits, and the theory
 evaporates. Six months in, it knows nothing on Monday that it didn't know on
 day one.
 
+<p align="center">
+  <img src="docs/assets/tether.png" alt="Tether desktop app: a project-scoped session with provider, model, latency profile, memory and plan-mode controls" width="900">
+</p>
+
 Tether keeps the loop and fixes the amnesia. The model is replaceable; the
 project understanding stays **tethered to you**.
+
+> ### The persistence model — why it matters
+>
+> Tether keeps a **persistent codebase mental model** per repository: a
+> queryable store of what the agent has *concluded* about your code — what
+> owns what, what a change affects, which patterns are allowed — with every
+> conclusion **cited to a specific slice of the repo at a specific commit** so
+> it can be re-checked instead of trusted.
+>
+> That is the difference between an assistant and a colleague. A colleague who
+> has worked in your repo for six months answers "what does touching
+> `RefundService.refund` break?" from memory and then glances at the code to
+> confirm; a harness re-derives it from grep every time, inconsistently, and at
+> full token cost. The model is consulted **before** retrieval, beliefs demote
+> themselves as the code drifts, architectural rules compile to graph queries
+> that return counterexamples, and the store's growth is bounded by the active
+> surface of work — not by repo size or history. None of it lives in the model,
+> so switching providers costs you nothing.
+>
+> There is a runnable test for whether this is real: delete the derived index,
+> disable grep and embeddings, and the agent must still answer *affects / owns
+> / allowed* from retained beliefs, re-fetching only the cited slices to
+> verify. It passes. Details below and in
+> [`docs/codebase-mental-model/`](docs/codebase-mental-model/).
 
 Local-first, model-flexible, terminal and desktop. Run fully offline with
 `llama.cpp` and an open-weight GGUF, or point the same harness at DeepSeek,
