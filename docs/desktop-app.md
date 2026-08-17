@@ -160,18 +160,34 @@ For broad AppImage compatibility, build on the oldest Linux baseline you intend
 to support. A package built against a newer glibc cannot be assumed to run on an
 older distribution.
 
-## Companion-engine requirements
+## Engine setup (the app installs it)
 
-This release expects `tether` to be installed on the target machine. The Rust
-host checks `TETHER_CLI`, the process `PATH`, pipx's default
+The desktop app runs the Python engine through the `tether` CLI. On launch it
+checks the machine (`check_environment` in the Rust host: Python 3.10+, pipx,
+the CLI, llama-server, git/cmake, Xcode CLT on macOS, bubblewrap on Linux) and,
+if the CLI is missing, opens the **Set up Tether** dialog instead of failing.
+One click runs the install in the Rust host and streams the log into the
+dialog; when it finishes the app connects to your project by itself. Nothing
+needs a terminal or sudo:
+
+- **Install Tether CLI** — installs pipx (Homebrew if present, else
+  `python -m pip install --user pipx`), then `pipx install git+<repo>`. If a
+  pipx install of `tether` already exists (including a developer's editable
+  checkout) it is upgraded in place, never replaced.
+- **Set up local models** — installs cmake if needed (Homebrew) and runs
+  `tether setup`, which clones and builds llama.cpp into `~/.tether/llama.cpp`
+  (or beside a git checkout of Tether). Offered from the runtime sheet's Local
+  provider when llama-server is not built.
+
+The wrench button in the sidebar reopens the dialog any time to re-check,
+update the CLI, or build llama.cpp. `tether doctor` (`--json`) prints the same
+facts from the terminal.
+
+The Rust host finds the CLI via `TETHER_CLI`, the process `PATH`, pipx's
 `~/.local/bin/tether`, standard system paths, macOS Python user-bin
-directories, and Homebrew locations on macOS.
-
-The runtime sheet discovers local GGUF files and starts `llama-server` after a
-model is selected. If none are installed, add a model directory from the sheet
-or run `tether setup`. Desktop apps do not reliably inherit shell startup
-files. Add provider keys in the runtime sheet, use `tether key set`, or expose
-them through the app's launch environment.
+directories, and Homebrew locations. Desktop apps do not reliably inherit shell
+startup files. Add provider keys in the runtime sheet, use `tether key set`, or
+expose them through the app's launch environment.
 
 API keys are stored only in the user config at `~/.tether/config.json`, which
 Tether writes with mode `0600`. They are never bundled into the web app or
@@ -256,6 +272,7 @@ The Python bridge and engine remain covered by the repository's unit suite.
    durable per project).
 2. Add full diff review and file citations beyond the current structured
    preview cards.
-3. Bundle a managed Python runtime and Tether wheel as a sidecar so the app no
-   longer depends on a separately installed CLI.
+3. Bundle a managed Python runtime and Tether wheel as a sidecar so the app
+   needs no Python on the machine at all (today it installs the CLI for you but
+   still needs Python 3.10+ or Homebrew present).
 4. Move signing/notarization into CI (the local `npm run dmg` pipeline is signed and notarized when the build Mac has the material; Linux release packages should be built and checksumed from a controlled CI run).

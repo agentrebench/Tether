@@ -645,6 +645,9 @@ export default function App() {
   const [working, setWorking] = useState(false);
   const [activity, setActivity] = useState("");
   const [activityElapsed, setActivityElapsed] = useState(0);
+  const [environment, setEnvironment] = useState<EnvironmentReport | null>(null);
+  const [setupOpen, setSetupOpen] = useState(false);
+  const [setupInitialStep, setSetupInitialStep] = useState<SetupStep | null>(null);
   const [approval, setApproval] = useState<ApprovalRequest | null>(null);
   const [approvalDecision, setApprovalDecision] = useState<"allow_once" | "allow_session" | "deny" | null>(null);
   const [questions, setQuestions] = useState<QuestionRequest | null>(null);
@@ -1206,6 +1209,22 @@ export default function App() {
     }
   }, [applyRuntimePayload, applySessionPayload, discardQueuedText, queueStreamText]);
 
+  const refreshEnvironment = useCallback(async (): Promise<EnvironmentReport | null> => {
+    try {
+      const report = await invoke<EnvironmentReport>("check_environment");
+      setEnvironment(report);
+      return report;
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const openSetup = useCallback((step: SetupStep | null = null) => {
+    setSetupInitialStep(step);
+    setSetupOpen(true);
+    void refreshEnvironment();
+  }, [refreshEnvironment]);
+
   const connectProject = useCallback(async (path: string) => {
     const bridgeId = uid();
     bridgeIdRef.current = bridgeId;
@@ -1246,8 +1265,13 @@ export default function App() {
       setConnection("failed");
       setActivity("");
       setError(message);
+      if (/not found/i.test(message)) {
+        setSetupInitialStep(null);
+        setSetupOpen(true);
+        void refreshEnvironment();
+      }
     }
-  }, [discardQueuedText]);
+  }, [discardQueuedText, refreshEnvironment]);
 
   const openWorkspacePath = useCallback(async (reference: string) => {
     const parsed = parsePathReference(reference, true);
@@ -1291,6 +1315,11 @@ export default function App() {
         unlisten();
         return;
       }
+      const report = await refreshEnvironment();
+      if (report && !report.ready) {
+        setSetupOpen(true);
+        return; // connecting would just fail; the setup dialog continues for us
+      }
       const savedProject = localStorage.getItem(PROJECT_STORAGE_KEY);
       if (savedProject) await connectProject(savedProject);
     })();
@@ -1300,7 +1329,7 @@ export default function App() {
       unlisten?.();
       void invoke("stop_bridge");
     };
-  }, [connectProject, handleBridgePayload]);
+  }, [connectProject, handleBridgePayload, refreshEnvironment]);
 
   const handleConversationScroll = useCallback(() => {
     const conversation = conversationRef.current;
@@ -1644,6 +1673,14 @@ export default function App() {
           <div className="brand-controls">
             <button
               className="theme-toggle"
+              onClick={() => openSetup(null)}
+              aria-label="Check installation"
+              title="Check installation: Tether CLI, llama.cpp, tools"
+            >
+              <Wrench size={15} />
+            </button>
+            <button
+              className="theme-toggle"
               onClick={() => setOnboardingOpen(true)}
               aria-label="Open Tether guide"
               title="Open Tether guide"
@@ -1878,6 +1915,23 @@ export default function App() {
           onClose={() => !runtimeSaving && setSettingsOpen(false)}
           onSave={(selection) => void saveRuntime(selection)}
           onAddModelDirectory={() => void addModelDirectory()}
+          localReady={environment?.localReady ?? true}
+          onSetupLocal={() => { setSettingsOpen(false); openSetup("build_llama"); }}
+        />
+      )}
+
+      {setupOpen && (
+        <SetupDialog
+          report={environment}
+          initialStep={setupInitialStep}
+          onRefresh={refreshEnvironment}
+          onClose={() => setSetupOpen(false)}
+          onReady={() => {
+            setSetupOpen(false);
+            setError(null);
+            const savedProject = localStorage.getItem(PROJECT_STORAGE_KEY);
+            if (savedProject) void connectProject(savedProject);
+          }}
         />
       )}
 
@@ -1897,6 +1951,202 @@ export default function App() {
           <TerminalSquare size={14} /> Engine log available <X size={13} />
         </button>
       )}
+    </div>
+  );
+}
+
+interface EnvironmentReport {
+  platform: string;
+  pythonPath: string | null;
+  pythonVersion: string | null;
+  pythonOk: boolean;
+  pipx: boolean;
+  homebrew: boolean;
+  git: boolean;
+  cmake: boolean;
+  xcodeClt: boolean;
+  bwrap: boolean;
+  tetherPath: string | null;
+  tetherVersion: string | null;
+  llamaServer: boolean;
+  ready: boolean;
+  localReady: boolean;
+}
+
+type SetupStep = "install_cli" | "build_llama";
+
+/** First-run / repair flow: shows what is installed and runs the install or
+ * build scripts in the Rust host, streaming their output here. Nothing needs
+ * a terminal; nothing needs sudo. */
+function SetupDialog({
+  report,
+  initialStep,
+  onRefresh,
+  onClose,
+  onReady,
+}: {
+  report: EnvironmentReport | null;
+  initialStep: SetupStep | null;
+  onRefresh: () => Promise<EnvironmentReport | null>;
+  onClose: () => void;
+  onReady: () => void;
+}) {
+  const [running, setRunning] = useState<SetupStep | null>(null);
+  const [lines, setLines] = useState<string[]>([]);
+  const [outcome, setOutcome] = useState<{ step: SetupStep; ok: boolean; code: number } | null>(null);
+  const setupIdRef = useRef("");
+  const logRef = useRef<HTMLPreElement>(null);
+  const autoStarted = useRef(false);
+
+  useEffect(() => {
+    let unlistenLog: UnlistenFn | undefined;
+    let unlistenDone: UnlistenFn | undefined;
+    void (async () => {
+      unlistenLog = await listen<{ setupId: string; stream: string; line: string }>("setup-log", (event) => {
+        if (event.payload.setupId !== setupIdRef.current) return;
+        setLines((current) => [...current.slice(-2000), event.payload.line]);
+      });
+      unlistenDone = await listen<{ setupId: string; step: SetupStep; code: number; ok: boolean }>("setup-done", (event) => {
+        if (event.payload.setupId !== setupIdRef.current) return;
+        setRunning(null);
+        setOutcome({ step: event.payload.step, ok: event.payload.ok, code: event.payload.code });
+        void onRefresh().then((fresh) => {
+          if (event.payload.ok && event.payload.step === "install_cli" && fresh?.ready) onReady();
+        });
+      });
+    })();
+    return () => { unlistenLog?.(); unlistenDone?.(); };
+  }, [onRefresh, onReady]);
+
+  useEffect(() => {
+    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
+  }, [lines]);
+
+  const run = useCallback(async (step: SetupStep) => {
+    if (running) return;
+    const setupId = uid();
+    setupIdRef.current = setupId;
+    setLines([]);
+    setOutcome(null);
+    setRunning(step);
+    try {
+      await invoke("run_setup_step", { step, setupId });
+    } catch (caught) {
+      setRunning(null);
+      setLines([String(caught)]);
+      setOutcome({ step, ok: false, code: -1 });
+    }
+  }, [running]);
+
+  useEffect(() => {
+    if (initialStep && !autoStarted.current && report) {
+      autoStarted.current = true;
+      void run(initialStep);
+    }
+  }, [initialStep, report, run]);
+
+  const isMac = report?.platform === "macos";
+  const isLinux = report?.platform === "linux";
+  const rows: Array<{ label: string; ok: boolean; detail: string; required: boolean }> = report ? [
+    {
+      label: "Python 3.10+",
+      ok: report.pythonOk,
+      detail: report.pythonVersion ? `${report.pythonVersion} · ${report.pythonPath}` : "not found",
+      required: !report.ready,
+    },
+    { label: "pipx", ok: report.pipx, detail: report.pipx ? "installed" : (report.homebrew ? "will be installed with Homebrew" : "will be installed for your user"), required: !report.ready },
+    { label: "Tether CLI", ok: report.ready, detail: report.tetherPath ? `${report.tetherVersion ?? ""} · ${report.tetherPath}` : "not installed", required: true },
+    { label: "llama.cpp (local models)", ok: report.llamaServer, detail: report.llamaServer ? "llama-server built" : "not built — only needed for local GGUF models", required: false },
+    ...(isMac ? [{ label: "Xcode command line tools", ok: report.xcodeClt, detail: report.xcodeClt ? "installed" : "run xcode-select --install (needed for git and building)", required: false }] : []),
+    { label: "git", ok: report.git, detail: report.git ? "installed" : "needed to install the CLI and build llama.cpp", required: false },
+    { label: "cmake", ok: report.cmake, detail: report.cmake ? "installed" : (report.homebrew ? "will be installed with Homebrew when building llama.cpp" : "needed to build llama.cpp"), required: false },
+    ...(isLinux ? [{ label: "bubblewrap", ok: report.bwrap, detail: report.bwrap ? "installed" : "sudo apt install bubblewrap — required for the shell sandbox", required: true }] : []),
+  ] : [];
+
+  return (
+    <div className="modal-backdrop">
+      <div className="onboarding-dialog setup-dialog" role="dialog" aria-modal="true" aria-labelledby="setup-title">
+        <header>
+          <div className="onboarding-brand">
+            <img src={appIcon} alt="" />
+            <div>
+              <strong>Set up Tether</strong>
+              <span>{report?.ready ? "Everything the app needs is installed." : "The app needs the Tether engine on this Mac. This installs it for you."}</span>
+            </div>
+          </div>
+          {report?.ready && (
+            <button type="button" className="icon-button" onClick={onClose} aria-label="Close" disabled={Boolean(running)}>
+              <X size={15} />
+            </button>
+          )}
+        </header>
+        <div className="setup-body">
+          <h2 id="setup-title">What&apos;s installed</h2>
+          {!report ? (
+            <p className="setup-muted">Checking this machine…</p>
+          ) : (
+            <ul className="setup-checks">
+              {rows.map((row) => (
+                <li key={row.label} className={row.ok ? "ok" : row.required ? "missing" : "optional"}>
+                  <span className="setup-mark">{row.ok ? <Check size={13} /> : row.required ? <X size={13} /> : <CircleHelp size={13} />}</span>
+                  <div>
+                    <strong>{row.label}</strong>
+                    <small>{row.detail}</small>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          <div className="setup-actions">
+            {!report?.ready && (
+              <button type="button" className="primary-action" onClick={() => void run("install_cli")} disabled={Boolean(running) || !report}>
+                {running === "install_cli" ? <span className="activity-spinner" /> : <ArrowDown size={15} />}
+                {running === "install_cli" ? "Installing Tether CLI…" : "Install Tether CLI"}
+              </button>
+            )}
+            {report?.ready && !report.llamaServer && (
+              <button type="button" className="primary-action" onClick={() => void run("build_llama")} disabled={Boolean(running)}>
+                {running === "build_llama" ? <span className="activity-spinner" /> : <Cpu size={15} />}
+                {running === "build_llama" ? "Building llama.cpp…" : "Set up local models (build llama.cpp)"}
+              </button>
+            )}
+            {report?.ready && (
+              <button type="button" className="secondary-action" onClick={() => void run("install_cli")} disabled={Boolean(running)}>
+                <RotateCcw size={14} /> Reinstall / update CLI
+              </button>
+            )}
+            <button type="button" className="secondary-action" onClick={() => void onRefresh()} disabled={Boolean(running)}>
+              Re-check
+            </button>
+          </div>
+
+          {!report?.ready && report && !report.pythonOk && !report.homebrew && (
+            <p className="setup-note">
+              <AlertTriangle size={13} /> Python 3.10 or newer was not found and Homebrew is not installed. Install Python from python.org (or Homebrew from brew.sh), then Re-check.
+            </p>
+          )}
+
+          {(lines.length > 0 || running) && (
+            <pre className="setup-log" ref={logRef} aria-live="polite">{lines.join("\n") || "Starting…"}</pre>
+          )}
+          {outcome && (
+            <p className={`setup-outcome ${outcome.ok ? "ok" : "failed"}`}>
+              {outcome.ok
+                ? (outcome.step === "install_cli" ? "Tether CLI installed." : "llama.cpp built. Pick a GGUF model in Runtime.")
+                : `The step failed (exit ${outcome.code}). The log above has the details; fix what it names and try again.`}
+            </p>
+          )}
+        </div>
+        <footer>
+          <small className="setup-muted">
+            Installs go to your user account only: pipx under ~/.local, llama.cpp under ~/.tether. No sudo.
+          </small>
+          {report?.ready && (
+            <button type="button" className="primary-action" onClick={onClose} disabled={Boolean(running)}>Continue</button>
+          )}
+        </footer>
+      </div>
     </div>
   );
 }
@@ -2212,6 +2462,8 @@ function RuntimeDialog({
   onClose,
   onSave,
   onAddModelDirectory,
+  localReady,
+  onSetupLocal,
 }: {
   providers: ProviderOption[];
   currentProvider: string;
@@ -2224,6 +2476,8 @@ function RuntimeDialog({
   onClose: () => void;
   onSave: (selection: RuntimeSelection) => void;
   onAddModelDirectory: () => void;
+  localReady: boolean;
+  onSetupLocal: () => void;
 }) {
   const initialProvider = providers.some((item) => item.id === currentProvider)
     ? currentProvider
@@ -2326,12 +2580,23 @@ function RuntimeDialog({
             <small>{provider?.description}</small>
           </label>
 
-          {selectedProvider === "local" && provider?.models.length === 0 ? (
+          {selectedProvider === "local" && !localReady ? (
+            <div className="local-empty">
+              <Cpu size={22} />
+              <div>
+                <strong>Local models need llama.cpp</strong>
+                <span>Tether builds it for you (a few minutes, once). Then add a GGUF folder.</span>
+              </div>
+              <button type="button" onClick={onSetupLocal} disabled={saving}>
+                <Wrench size={14} /> Build llama.cpp
+              </button>
+            </div>
+          ) : selectedProvider === "local" && provider?.models.length === 0 ? (
             <div className="local-empty">
               <Cpu size={22} />
               <div>
                 <strong>No local GGUF models found</strong>
-                <span>Add a folder now, or install a model later with <code>tether setup</code>.</span>
+                <span>Add a folder that contains .gguf files.</span>
               </div>
               <button type="button" onClick={onAddModelDirectory} disabled={saving}>
                 <Plus size={14} /> Add model folder

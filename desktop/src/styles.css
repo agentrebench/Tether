@@ -445,6 +445,27 @@ button { color: inherit; }
 .moat-note > svg { color: var(--green); }
 .moat-note strong { font-size: 12px; }
 .moat-note p { margin: 4px 0 0; color: var(--muted); font-size: 10px; line-height: 1.55; }
+.setup-dialog { width: min(720px, 100%); }
+.setup-body { display: flex; flex-direction: column; gap: 14px; padding: 18px; }
+.setup-body h2 { margin: 0; font-size: 15px; }
+.setup-checks { margin: 0; padding: 0; list-style: none; display: grid; gap: 8px; }
+.setup-checks li { display: grid; grid-template-columns: 22px minmax(0,1fr); gap: 10px; align-items: start; padding: 9px 11px; border: 1px solid var(--line); border-radius: 10px; background: rgba(255,255,255,.018); }
+.setup-checks li > div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.setup-checks li strong { font-size: 13px; }
+.setup-checks li small { color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.setup-mark { width: 22px; height: 22px; display: grid; place-items: center; border-radius: 7px; }
+.setup-checks li.ok .setup-mark { color: var(--green); background: rgba(168,255,22,.12); }
+.setup-checks li.missing .setup-mark { color: var(--red); background: rgba(255,90,90,.12); }
+.setup-checks li.optional .setup-mark { color: var(--muted); background: rgba(255,255,255,.05); }
+.setup-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.setup-log { max-height: 260px; margin: 0; padding: 12px; overflow: auto; border: 1px solid var(--line); border-radius: 10px; background: #0b0b11; color: #cfcbdc; font: 11.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.setup-outcome { margin: 0; font-size: 12px; }
+.setup-outcome.ok { color: var(--green); }
+.setup-outcome.failed { color: var(--red); }
+.setup-note { display: flex; gap: 8px; align-items: flex-start; margin: 0; padding: 10px 12px; border-radius: 10px; background: rgba(241,173,102,.10); color: var(--orange); font-size: 12px; }
+.setup-muted { color: var(--muted); font-size: 11px; }
+:root[data-theme="light"] .setup-log { background: #f3f2f8; color: #2a2734; }
+
 .onboarding-dialog > footer { position: sticky; bottom: 0; display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 13px 18px; border-top: 1px solid var(--line); background: rgba(19,18,26,.95); backdrop-filter: blur(16px); }
 .onboarding-primary { height: 33px; display: flex; align-items: center; justify-content: center; gap: 7px; padding: 0 12px; border-radius: 8px; cursor: pointer; }
 .runtime-dialog { width: min(680px, 100%); max-height: calc(100vh - 56px); overflow: auto; border: 1px solid var(--line-strong); border-radius: 16px; background: #17161f; box-shadow: 0 30px 100px rgba(0,0,0,.55); }

@@ -25,6 +25,7 @@ from .core.config import (
     provider_model,
 )
 from .core.logging import setup_logging, get_logger
+from . import __version__
 
 
 GGUF_DIR = Path(__file__).resolve().parent.parent / "gpt-oss-120b-Derestricted-GGUF"
@@ -58,7 +59,25 @@ LOCAL_GGUF_DIRS: list[Path] = [
     # Auto-pick up any ~/Projects/*-GGUF/ repo layout
     *_auto_project_gguf_dirs(),
 ]
-LLAMA_CPP_DIR = Path(__file__).resolve().parent.parent / "llama.cpp"
+def _default_llama_cpp_dir() -> Path:
+    """Where `tether setup` clones/builds llama.cpp.
+
+    Order: ``TETHER_LLAMA_CPP_DIR`` if set; a checkout next to a git clone of
+    Tether (the historical location, kept so existing builds are found); else
+    ``~/.tether/llama.cpp`` — outside any pipx venv, so upgrading the CLI does
+    not delete a build that took minutes.
+    """
+    override = os.environ.get("TETHER_LLAMA_CPP_DIR", "").strip()
+    if override:
+        return Path(override).expanduser()
+    package_dir = Path(__file__).resolve().parent
+    beside_checkout = package_dir.parent / "llama.cpp"
+    if (package_dir / ".git").exists() or beside_checkout.exists():
+        return beside_checkout
+    return CONFIG_DIR / "llama.cpp"
+
+
+LLAMA_CPP_DIR = _default_llama_cpp_dir()
 LLAMA_SERVER_BIN = LLAMA_CPP_DIR / "build" / "bin" / "llama-server"
 HF_CACHE_DIR = Path.home() / ".cache" / "huggingface" / "hub"
 
@@ -957,6 +976,46 @@ def server_is_running(config: TetherConfig) -> bool:
         return False
 
 
+def doctor_report() -> dict:
+    """Facts the desktop app and support need, with no secrets."""
+    import platform as _platform
+
+    config = TetherConfig.load()
+    server_bin = find_llama_server()
+    return {
+        "version": __version__,
+        "python": _platform.python_version(),
+        "python_executable": sys.executable,
+        "config_dir": str(CONFIG_DIR),
+        "llama_cpp_dir": str(LLAMA_CPP_DIR),
+        "llama_server": str(server_bin) if server_bin else None,
+        "llama_server_ok": server_bin is not None,
+        "provider": config.provider or "local",
+        "model": config.model_path if (config.provider or "local") == "local" else config.api_model,
+        "gguf_models_found": len(discover_models()),
+        "platform": _platform.system().lower(),
+    }
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    report = doctor_report()
+    if args.json:
+        print(json.dumps(report, indent=2))
+        return 0
+    from .ui.colors import bold, dim, success, warning
+
+    print(bold("Tether doctor"))
+    print(f"  version        {report['version']}")
+    print(f"  python         {report['python']}  {dim(report['python_executable'])}")
+    print(f"  config         {report['config_dir']}")
+    if report["llama_server_ok"]:
+        print(f"  llama-server   {success('built')}  {dim(report['llama_server'])}")
+    else:
+        print(f"  llama-server   {warning('not built')}  {dim('run: tether setup')}")
+    print(f"  provider       {report['provider']} ({report['model'] or 'no model selected'})")
+    return 0
+
+
 def cmd_setup(args: argparse.Namespace) -> int:
     from .ui.colors import bold, dim, error, info, success, warning
 
@@ -967,7 +1026,8 @@ def cmd_setup(args: argparse.Namespace) -> int:
     if LLAMA_CPP_DIR.exists():
         print(success(f"llama.cpp found at {LLAMA_CPP_DIR}"))
     else:
-        print(info("Cloning llama.cpp..."))
+        print(info(f"Cloning llama.cpp into {LLAMA_CPP_DIR}..."))
+        LLAMA_CPP_DIR.parent.mkdir(parents=True, exist_ok=True)
         result = subprocess.run(
             ["git", "clone", "--depth", "1", "https://github.com/ggerganov/llama.cpp.git", str(LLAMA_CPP_DIR)],
             cwd=str(LLAMA_CPP_DIR.parent),
@@ -1819,6 +1879,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Start the REPL resuming a saved conversation "
              "(no id = most recent; list them with /resume inside the REPL)",
     )
+    parser.add_argument("--version", action="version", version=f"tether {__version__}")
     subparsers = parser.add_subparsers(dest="command")
 
     start_parser = subparsers.add_parser("start", help="Start server (if needed) + REPL")
@@ -1867,6 +1928,10 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("stop", help="Stop background server")
     subparsers.add_parser("setup", help="Clone llama.cpp, build, and configure")
     subparsers.add_parser("config", help="Show current configuration")
+    doctor_parser = subparsers.add_parser(
+        "doctor", help="Report what is installed (Python, llama-server, config); --json for tools"
+    )
+    doctor_parser.add_argument("--json", action="store_true", help="Machine-readable output")
 
     remote_parser = subparsers.add_parser(
         "remote",
@@ -1941,6 +2006,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_stop(args)
     elif args.command == "setup":
         return cmd_setup(args)
+    elif args.command == "doctor":
+        return cmd_doctor(args)
     elif args.command == "remote":
         return cmd_remote(args)
     elif args.command == "key":

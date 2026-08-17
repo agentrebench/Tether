@@ -254,6 +254,305 @@ fn find_executable_on_path(name: &str, path_value: &OsStr) -> Option<PathBuf> {
         .find(|candidate| executable_file(candidate))
 }
 
+/// PATH for child processes: desktop apps do not inherit the shell profile,
+/// so add the places pipx, python.org, and Homebrew put binaries.
+fn desktop_path() -> Option<std::ffi::OsString> {
+    let mut path_entries: Vec<PathBuf> = Vec::new();
+    if let Ok(home) = env::var("HOME") {
+        path_entries.push(PathBuf::from(&home).join(".local/bin"));
+        if cfg!(target_os = "macos") {
+            for version in ["3.14", "3.13", "3.12", "3.11", "3.10"] {
+                path_entries.push(
+                    PathBuf::from(&home)
+                        .join("Library")
+                        .join("Python")
+                        .join(version)
+                        .join("bin"),
+                );
+            }
+            path_entries.push(PathBuf::from("/opt/homebrew/bin"));
+        }
+    }
+    path_entries.push(PathBuf::from("/usr/local/bin"));
+    path_entries.push(PathBuf::from("/usr/bin"));
+    path_entries.push(PathBuf::from("/bin"));
+    if let Some(inherited) = env::var_os("PATH") {
+        path_entries.extend(env::split_paths(&inherited));
+    }
+    env::join_paths(path_entries).ok()
+}
+
+fn which_on_desktop_path(name: &str) -> Option<PathBuf> {
+    let path_value = desktop_path()?;
+    find_executable_on_path(name, &path_value)
+}
+
+fn command_stdout(program: &Path, args: &[&str]) -> Option<String> {
+    let mut command = Command::new(program);
+    command.args(args);
+    if let Some(joined) = desktop_path() {
+        command.env("PATH", joined);
+    }
+    let output = command.output().ok()?;
+    let mut text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if text.is_empty() {
+        text = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    }
+    Some(text)
+}
+
+/// Parse "Python 3.12.4" → (3, 12).
+fn python_version(path: &Path) -> Option<(u32, u32)> {
+    let text = command_stdout(path, &["--version"])?;
+    let digits = text.strip_prefix("Python ")?.trim();
+    let mut parts = digits.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    Some((major, minor))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EnvironmentReport {
+    platform: String,
+    python_path: Option<String>,
+    python_version: Option<String>,
+    python_ok: bool,
+    pipx: bool,
+    homebrew: bool,
+    git: bool,
+    cmake: bool,
+    xcode_clt: bool,
+    bwrap: bool,
+    tether_path: Option<String>,
+    tether_version: Option<String>,
+    llama_server: bool,
+    /// The whole point: can the app open a project right now?
+    ready: bool,
+    /// Can we run local GGUF models right now?
+    local_ready: bool,
+}
+
+/// What is installed on this machine, from the desktop app's point of view.
+/// Cheap (a handful of `--version` calls) and side-effect free.
+#[tauri::command]
+fn check_environment() -> EnvironmentReport {
+    // Newest usable interpreter wins; Apple's /usr/bin/python3 may be 3.9.
+    let mut python: Option<(PathBuf, (u32, u32))> = None;
+    for name in [
+        "python3.14",
+        "python3.13",
+        "python3.12",
+        "python3.11",
+        "python3.10",
+        "python3",
+    ] {
+        if let Some(path) = which_on_desktop_path(name) {
+            if let Some(version) = python_version(&path) {
+                let better = match &python {
+                    Some((_, current)) => version > *current,
+                    None => true,
+                };
+                if better {
+                    python = Some((path, version));
+                }
+            }
+        }
+    }
+    let python_ok = python
+        .as_ref()
+        .map(|(_, (major, minor))| *major == 3 && *minor >= 10)
+        .unwrap_or(false);
+    let tether = locate_tether().ok();
+    // The CLI knows its own version and where it built llama-server; ask it
+    // (`tether doctor --json`) instead of re-deriving that here.
+    let doctor: Option<Value> = tether
+        .as_ref()
+        .and_then(|path| command_stdout(path, &["doctor", "--json"]))
+        .and_then(|text| serde_json::from_str(&text).ok());
+    let tether_version = doctor
+        .as_ref()
+        .and_then(|d| d.get("version"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let llama_server = doctor
+        .as_ref()
+        .and_then(|d| d.get("llama_server_ok"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || which_on_desktop_path("llama-server").is_some();
+    let xcode_clt = if cfg!(target_os = "macos") {
+        Command::new("/usr/bin/xcode-select")
+            .arg("-p")
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    } else {
+        true
+    };
+    let bwrap = if cfg!(target_os = "linux") {
+        which_on_desktop_path("bwrap").is_some()
+    } else {
+        true
+    };
+    EnvironmentReport {
+        platform: env::consts::OS.to_string(),
+        python_path: python.as_ref().map(|(path, _)| path.display().to_string()),
+        python_version: python
+            .as_ref()
+            .map(|(_, (major, minor))| format!("{major}.{minor}")),
+        python_ok,
+        pipx: which_on_desktop_path("pipx").is_some(),
+        homebrew: which_on_desktop_path("brew").is_some(),
+        git: which_on_desktop_path("git").is_some(),
+        cmake: which_on_desktop_path("cmake").is_some(),
+        xcode_clt,
+        bwrap,
+        tether_path: tether.as_ref().map(|path| path.display().to_string()),
+        tether_version,
+        llama_server,
+        ready: tether.is_some(),
+        local_ready: tether.is_some() && llama_server,
+    }
+}
+
+#[derive(Default)]
+struct SetupState(Mutex<Option<Child>>);
+
+const TETHER_REPO_URL: &str = "https://github.com/agentrebench/Tether.git";
+
+fn setup_script(step: &str) -> Result<String, String> {
+    // Every script is idempotent and re-runnable; output is streamed to the
+    // app line by line. Nothing here needs sudo.
+    let script = match step {
+        "install_cli" => format!(
+            r#"set -euo pipefail
+echo "==> Checking for pipx"
+if ! command -v pipx >/dev/null 2>&1; then
+  if command -v brew >/dev/null 2>&1; then
+    echo "==> Installing pipx with Homebrew"
+    brew install pipx
+  else
+    echo "==> Installing pipx for the current user"
+    PY=""
+    for c in python3.14 python3.13 python3.12 python3.11 python3.10 python3; do
+      if command -v "$c" >/dev/null 2>&1; then PY="$c"; break; fi
+    done
+    if [ -z "$PY" ]; then echo "error: Python 3.10+ is required. Install it from https://www.python.org/downloads/ and retry." >&2; exit 2; fi
+    "$PY" -m pip install --user --upgrade pipx
+    export PATH="$HOME/.local/bin:$HOME/Library/Python/3.14/bin:$HOME/Library/Python/3.13/bin:$HOME/Library/Python/3.12/bin:$HOME/Library/Python/3.11/bin:$HOME/Library/Python/3.10/bin:$PATH"
+  fi
+fi
+pipx ensurepath >/dev/null 2>&1 || true
+if pipx list --short 2>/dev/null | grep -q '^tether '; then
+  # Keep the existing install's source (a git URL, or a developer's editable
+  # checkout) and just bring it up to date.
+  echo "==> Tether is already installed with pipx; upgrading in place"
+  pipx upgrade tether || pipx reinstall tether
+else
+  echo "==> Installing the Tether CLI (this clones the repo and builds a wheel)"
+  pipx install "git+{repo}"
+fi
+echo "==> Installed:"
+"$HOME/.local/bin/tether" --version 2>/dev/null || tether --version
+echo "==> Done"
+"#,
+            repo = TETHER_REPO_URL
+        ),
+        "build_llama" => r#"set -euo pipefail
+if ! command -v git >/dev/null 2>&1; then echo "error: git is required (macOS: run 'xcode-select --install')." >&2; exit 2; fi
+if ! command -v cmake >/dev/null 2>&1; then
+  if command -v brew >/dev/null 2>&1; then
+    echo "==> Installing cmake with Homebrew"
+    brew install cmake
+  else
+    echo "error: cmake is required to build llama.cpp. Install Homebrew (https://brew.sh) or cmake, then retry." >&2
+    exit 2
+  fi
+fi
+TETHER="$(command -v tether || echo "$HOME/.local/bin/tether")"
+echo "==> Building llama.cpp with: $TETHER setup"
+"$TETHER" setup
+echo "==> Done"
+"#
+        .to_string(),
+        other => return Err(format!("Unknown setup step: {other}")),
+    };
+    Ok(script)
+}
+
+/// Run one setup step in a login-less bash and stream its output as
+/// `setup-log` events; `setup-done` carries the exit code. One at a time.
+#[tauri::command]
+fn run_setup_step(
+    app: tauri::AppHandle,
+    state: State<'_, SetupState>,
+    step: String,
+    setup_id: String,
+) -> Result<(), String> {
+    let script = setup_script(&step)?;
+    let mut guard = state
+        .0
+        .lock()
+        .map_err(|_| "Setup state poisoned".to_string())?;
+    if let Some(existing) = guard.as_mut() {
+        if let Ok(None) = existing.try_wait() {
+            return Err("A setup step is already running.".to_string());
+        }
+    }
+    let mut command = Command::new("bash");
+    command
+        .arg("-c")
+        .arg(&script)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("NONINTERACTIVE", "1")
+        .env("HOMEBREW_NO_AUTO_UPDATE", "1")
+        .env("PIP_DISABLE_PIP_VERSION_CHECK", "1")
+        .env("GIT_TERMINAL_PROMPT", "0");
+    if let Some(joined) = desktop_path() {
+        command.env("PATH", joined);
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("Could not start setup: {error}"))?;
+    let stdout = child.stdout.take().ok_or("Could not read setup output")?;
+    let stderr = child.stderr.take().ok_or("Could not read setup errors")?;
+
+    let emit_lines =
+        |app: tauri::AppHandle, id: String, reader: Box<dyn Read + Send>, stream: &'static str| {
+            thread::spawn(move || {
+                for line in BufReader::new(reader).lines().map_while(Result::ok) {
+                    let _ = app.emit(
+                        "setup-log",
+                        json!({ "setupId": id, "stream": stream, "line": line }),
+                    );
+                }
+            })
+        };
+    let out_thread = emit_lines(app.clone(), setup_id.clone(), Box::new(stdout), "stdout");
+    let err_thread = emit_lines(app.clone(), setup_id.clone(), Box::new(stderr), "stderr");
+
+    // Wait in the background and report the exit code.
+    let done_app = app.clone();
+    let done_id = setup_id.clone();
+    let done_step = step.clone();
+    let mut waiter = child;
+    thread::spawn(move || {
+        let status = waiter.wait().ok();
+        let _ = out_thread.join();
+        let _ = err_thread.join();
+        let code = status.and_then(|s| s.code()).unwrap_or(-1);
+        let _ = done_app.emit(
+            "setup-done",
+            json!({ "setupId": done_id, "step": done_step, "code": code, "ok": code == 0 }),
+        );
+    });
+    *guard = None;
+    Ok(())
+}
+
 fn locate_tether() -> Result<PathBuf, String> {
     if let Ok(configured) = env::var("TETHER_CLI") {
         let path = PathBuf::from(configured);
@@ -361,29 +660,7 @@ fn start_bridge(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    let mut path_entries: Vec<PathBuf> = Vec::new();
-    if let Ok(home) = env::var("HOME") {
-        path_entries.push(PathBuf::from(&home).join(".local/bin"));
-        if cfg!(target_os = "macos") {
-            for version in ["3.14", "3.13", "3.12", "3.11", "3.10"] {
-                path_entries.push(
-                    PathBuf::from(&home)
-                        .join("Library")
-                        .join("Python")
-                        .join(version)
-                        .join("bin"),
-                );
-            }
-            path_entries.push(PathBuf::from("/opt/homebrew/bin"));
-        }
-    }
-    path_entries.push(PathBuf::from("/usr/local/bin"));
-    path_entries.push(PathBuf::from("/usr/bin"));
-    path_entries.push(PathBuf::from("/bin"));
-    if let Some(inherited) = env::var_os("PATH") {
-        path_entries.extend(env::split_paths(&inherited));
-    }
-    if let Ok(joined) = env::join_paths(path_entries) {
+    if let Some(joined) = desktop_path() {
         command.env("PATH", joined);
     }
 
@@ -511,11 +788,14 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(BridgeState::default())
+        .manage(SetupState::default())
         .invoke_handler(tauri::generate_handler![
             start_bridge,
             send_bridge,
             stop_bridge,
-            read_workspace_entry
+            read_workspace_entry,
+            check_environment,
+            run_setup_step
         ])
         .run(tauri::generate_context!())
         .expect("error while running Tether desktop");

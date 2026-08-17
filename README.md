@@ -87,6 +87,11 @@ model-specific reasoning controls and per-provider key setup.
 Anything restricted asks first: **Allow once**, **Allow full session**, or
 **No** — and a No ends the turn and hands control back to you.
 
+First launch sets itself up: the app checks for the Tether engine and, if it's
+missing, installs it for you (pipx, no sudo) and builds llama.cpp on request
+for local models — all from a dialog with a live log. `tether doctor` shows
+the same status from the terminal.
+
 ```bash
 cd desktop
 npm install
@@ -258,7 +263,7 @@ The offline / no-API-bill path. Needs a GGUF model on disk and `llama.cpp` built
 tether setup
 ```
 
-This is a one-time cost. `llama.cpp` is cloned next to the `tether` package directory (i.e. `<repo-parent>/llama.cpp/`); repeat the setup only if you delete that.
+This is a one-time cost. `llama.cpp` is cloned into `~/.tether/llama.cpp` (or next to a git checkout of Tether if you develop from one; override with `TETHER_LLAMA_CPP_DIR`). Repeat the setup only if you delete that. The desktop app runs the same step from its Setup dialog.
 
 **2. Get a model.** Two common paths:
 
@@ -325,7 +330,8 @@ tether start          # start server if needed, then open the REPL
 tether run            # alias of start
 tether serve          # run llama-server in the foreground
 tether stop           # stop the background llama-server
-tether setup          # clone llama.cpp + build llama-server
+tether setup          # clone llama.cpp + build llama-server (~/.tether/llama.cpp)
+tether doctor         # what is installed: python, llama-server, provider (--json)
 tether config         # print current config (api_key is masked)
 
 tether remote                          # show current provider
