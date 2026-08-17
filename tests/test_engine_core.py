@@ -5,6 +5,7 @@ churn and previously had no coverage at all."""
 import email.message
 import io
 import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -275,11 +276,22 @@ class BashToolBehavior(unittest.TestCase):
     def test_cancel_kills_child_processes(self):
         cancel = threading.Event()
         threading.Timer(0.5, cancel.set).start()
-        # The sleep is a child of bash; group-kill must reach it.
+        # The sleep is a child of bash; group-kill must reach it. Use a
+        # distinctive duration so the check cannot match anything else.
         self.tool.execute_with_cancel(
-            {"command": "sleep 300 & wait"}, cancel)
-        time.sleep(0.5)
-        out = os.popen("pgrep -f 'sleep 300'").read().strip()
+            {"command": "sleep 300.31 & wait"}, cancel)
+        # The signal is delivered synchronously, but the orphaned child is
+        # reaped by init on its own schedule (slow on CI); poll briefly and
+        # anchor the pattern so the `sh -c pgrep ...` wrapper never matches.
+        deadline = time.monotonic() + 5.0
+        out = "x"
+        while time.monotonic() < deadline:
+            out = subprocess.run(
+                ["pgrep", "-f", "^sleep 300\\.31$"], capture_output=True, text=True,
+            ).stdout.strip()
+            if not out:
+                break
+            time.sleep(0.1)
         self.assertEqual(out, "")
 
     def test_cwd_persists_between_calls(self):
