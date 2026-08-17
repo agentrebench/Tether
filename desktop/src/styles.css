@@ -114,8 +114,7 @@ button { color: inherit; }
 .brand-mark { width: 34px; height: 34px; overflow: hidden; border-radius: 10px; }
 .brand-mark img, .welcome-orbit img { width: 100%; height: 100%; display: block; object-fit: cover; }
 .brand div:last-child { display: flex; flex-direction: column; gap: 1px; }
-.brand strong { font-size: 15px; letter-spacing: 0.13em; }
-.brand span { color: var(--muted); font-size: 13px; }
+.brand strong { font-size: 16px; font-weight: 700; letter-spacing: 0.02em; }
 .theme-toggle { width: 31px; height: 31px; display: grid; place-items: center; flex: 0 0 auto; padding: 0; border: 1px solid var(--line); border-radius: 9px; background: rgba(255,255,255,.025); color: var(--muted); cursor: pointer; }
 .theme-toggle:hover { border-color: rgba(155,124,246,.34); background: var(--purple-soft); color: var(--purple-bright); }
 
