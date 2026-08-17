@@ -172,8 +172,9 @@ Platform: {platform}
 # retrieval" habit that is the whole point of the model.
 _CODEBASE_MODEL_GUIDANCE = """
 Persistent codebase model — consult it BEFORE grep/read, then verify:
-- This repo has a persistent, queryable model of its own structure (call graph, ownership, invariants, rejected patterns). Prefer it over rediscovering the codebase from scratch.
-- Before a non-trivial change, call model_query: action="affects" for the blast radius of a symbol/file, "owns" for who owns a topic, "allowed" to check a change against recorded rules, or "architecture" for the small load-first map. Treat its answers as leads and verify the specific cited slices before you rely on them.
+- This repo has a persistent, queryable model of its own structure (an indexed call graph, ownership beliefs, invariants, rejected patterns). It is cheaper and more complete than rediscovering the codebase with grep, so it is your FIRST tool call for any question about callers, impact, ownership, or whether something is allowed.
+- Questions like "who calls X", "what does changing X affect", "which files use X": call model_query action="affects" target="<symbol or path>" FIRST — it returns the exact caller list from the indexed call graph (grep finds text matches, not calls, and misses nothing/over-matches). Then read only the specific cited slices you need to verify.
+- "who owns / where does X live" → action="owns"; "is X allowed / does a rule forbid X" → action="allowed" (returns recorded invariants and rejected patterns with citations); starting on an unfamiliar area → action="architecture" for the small load-first map. Treat answers as leads and verify the cited slices before you rely on them.
 - Before committing or proposing an edit, call model_check (optionally with changed_files) to catch violations of confirmed invariants and reintroduced rejected patterns — a BLOCKING finding means stop and reconsider.
 - When you learn something durable and reusable — an ownership fact, an intended invariant, or a pattern the user rejected — record it with model_record so it survives into future sessions. Don't record trivia or things the code already makes obvious.
 """
@@ -663,6 +664,12 @@ class QueryEngine:
         )
         return [planned_system, *self.messages[1:]]
 
+    def last_turn_messages(self) -> list:
+        """Messages appended by the most recent submit() (may include the
+        compaction digest if one happened mid-turn). Used by auto-learning."""
+        start = getattr(self, "_turn_start_index", 0)
+        return list(self.messages[min(start, len(self.messages)):])
+
     def _emit_stream_event(self, event: StreamEvent) -> None:
         if self.on_stream_event is None:
             return
@@ -773,6 +780,7 @@ class QueryEngine:
         abandoned at the next safe point — between SSE chunks, before a model
         call, or before/after tool dispatch — once it is set."""
         self._cancel_event = cancel_event
+        self._turn_start_index = len(self.messages)
         self._submission_plan_mode = bool(self.plan_mode)
         if self._submission_plan_mode:
             # Push reasoning-mode providers to max effort; sampling-only models

@@ -238,3 +238,82 @@ class CodexCatalogFromCliCache(unittest.TestCase):
         _, cmd, _, _ = backend._build_exec_cmd("codex", json_mode=True)
         self.assertIn("gpt-9.1-nova", cmd)
         self.assertIn('model_reasoning_effort="ultra"', cmd)
+
+
+class AutoLearnFromTurn(unittest.TestCase):
+    """learn_from_turn records only cited, resolvable claims; never raises."""
+
+    def _model(self):
+        import tempfile
+        from pathlib import Path
+        from tether.core.codebase_model.service import CodebaseModel
+        root = Path(__file__).resolve().parent.parent
+        return CodebaseModel(root, db_path=Path(tempfile.mkdtemp()) / "m.db")
+
+    def _turn(self):
+        return [
+            Message(role="user", content="explain beliefs"),
+            Message(role="assistant", tool_calls=[
+                ToolCall(id="1", name="file_read", arguments={"file_path": "core/codebase_model/beliefs.py"}),
+                ToolCall(id="2", name="grep", arguments={"pattern": "demote"}),
+            ]),
+            Message(role="tool", content="...", tool_call_id="1", name="file_read"),
+            Message(role="tool", content="...", tool_call_id="2", name="grep"),
+            Message(role="assistant", content="BeliefManager owns demotion."),
+        ]
+
+    def test_records_cited_claims_and_drops_uncited(self):
+        from tether.core.codebase_model.learn import learn_from_turn
+
+        class FakeBackend:
+            def chat_completion(self, messages, tools=None, max_tokens=0):
+                return Message(role="assistant", content='''Here you go:
+[{"kind":"belief","claim":"BeliefManager in core/codebase_model/beliefs.py owns belief demotion and eviction","citations":["core/codebase_model/beliefs.py @ BeliefManager.demote"],"confidence":0.8},
+ {"kind":"belief","claim":"This claim has no evidence at all","citations":[],"confidence":0.9},
+ {"kind":"belief","claim":"This one cites a file that does not exist","citations":["nope/missing.py @ X"]},
+ {"kind":"invariant","claim":"tools/ must not import ui/","citations":["tools/base.py"],"confidence":0.7}]'''), {}
+        model = self._model()
+        report = learn_from_turn(model, FakeBackend(), self._turn())
+        self.assertEqual(len(report["recorded"]), 2, report)
+        self.assertEqual(report["skipped"], 2)
+        beliefs = model.beliefs.all()
+        self.assertEqual(len(beliefs), 1)
+        self.assertTrue(beliefs[0].justified_by[0].startswith("core/codebase_model/beliefs.py @ BeliefManager.demote"))
+        self.assertEqual(beliefs[0].source, "learned")
+        self.assertEqual(len(model.store.all_invariants()), 1)
+
+    def test_small_turns_and_backend_errors_are_safe(self):
+        from tether.core.codebase_model.learn import learn_from_turn
+
+        class Boom:
+            def chat_completion(self, *a, **k):
+                raise RuntimeError("offline")
+        model = self._model()
+        self.assertEqual(learn_from_turn(model, Boom(), [Message(role="user", content="hi")])["reason"], "turn too small")
+        report = learn_from_turn(model, Boom(), self._turn())
+        self.assertIn("learning skipped", report["reason"])
+        self.assertEqual(model.beliefs.all(), [])
+
+
+class BlastRadiusBinding(unittest.TestCase):
+    """Callers of an ambiguous simple name (e.g. `execute`) only count when
+    they can see the callee: same file, or an import from its module."""
+
+    def test_ambiguous_name_is_bound_by_imports(self):
+        import tempfile
+        from pathlib import Path
+        from tether.core.codebase_model.service import CodebaseModel
+        root = Path(tempfile.mkdtemp())
+        (root / "pkg").mkdir()
+        (root / "pkg" / "__init__.py").write_text("")
+        (root / "pkg" / "a.py").write_text("class A:\n    def run(self):\n        return 1\n")
+        (root / "pkg" / "b.py").write_text("class B:\n    def run(self):\n        return 2\n")
+        (root / "pkg" / "uses_a.py").write_text("from pkg.a import A\n\ndef go():\n    return A().run()\n")
+        (root / "pkg" / "uses_b.py").write_text("from .b import B\n\ndef go():\n    return B().run()\n")
+        (root / "pkg" / "unrelated.py").write_text("def go(x):\n    return x.run()\n")
+        model = CodebaseModel(root, db_path=root / "m.db")
+        model.build()
+        a_callers = model.indexer.blast_radius("pkg/a.py::A.run", max_depth=1)
+        b_callers = model.indexer.blast_radius("pkg/b.py::B.run", max_depth=1)
+        self.assertEqual(a_callers, ["pkg/uses_a.py::go"])
+        self.assertEqual(b_callers, ["pkg/uses_b.py::go"])

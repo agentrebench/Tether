@@ -359,7 +359,7 @@ class AppBridgeServer:
             on_update=self._on_todo_update,
         )
         registry.tools["todo_write"] = self.todo_tool
-        return QueryEngine(
+        engine = QueryEngine(
             config=self.config,
             tool_registry=registry,
             permissions=self.permissions,
@@ -373,6 +373,86 @@ class AppBridgeServer:
             # summary from one project cannot seed paths into another.
             include_last_session_summary=False,
         )
+        self._bootstrap_codebase_model(engine)
+        return engine
+
+    # -- persistent codebase model ---------------------------------------
+    def _bootstrap_codebase_model(self, engine: QueryEngine) -> None:
+        """Make the mental model load-bearing without the user doing anything:
+        resolve the per-repo model, keep it fresh on the agent's own edits, give
+        stale beliefs a real LLM re-verifier, and build/sync the substrate in
+        the background so the first turn already has an architecture index."""
+        self.codebase_model = None
+        if not getattr(self.config, "codebase_model_enabled", False):
+            return
+        try:
+            from .core.codebase_model.service import _resolve_root, get_model, set_default_verifier
+            from .core.codebase_model.verify import llm_verifier
+
+            if _resolve_root(self.project) == Path.home():
+                return  # never model the whole home directory
+            model = get_model(self.project)
+            model.beliefs.max_beliefs = getattr(self.config, "codebase_model_max_beliefs", 500)
+            model.indexer.max_files = getattr(self.config, "codebase_model_max_files", 10000)
+            self.codebase_model = model
+            engine.on_edit_hook = self._model_on_edit
+            try:
+                set_default_verifier(llm_verifier(engine.backend))
+            except Exception:
+                pass
+        except Exception:
+            self.codebase_model = None
+            return
+
+        def warm() -> None:
+            try:
+                if model.store.count_nodes() > 0:
+                    model.sync()
+                else:
+                    model.build()
+            except Exception:
+                pass
+
+        threading.Thread(target=warm, daemon=True, name="tether-model-warm").start()
+
+    def _model_on_edit(self, file_path: str) -> None:
+        model = getattr(self, "codebase_model", None)
+        if model is None:
+            return
+        try:
+            from .core.codebase_model.substrate_generic import language_for
+
+            path = Path(file_path)
+            abs_path = path if path.is_absolute() else (self.project / path)
+            rel = abs_path.resolve().relative_to(Path(model.repo_root).resolve()).as_posix()
+            if rel.endswith(".py") or language_for(rel) is not None:
+                model.on_edit(rel)
+        except Exception:
+            pass
+
+    def _learn_from_turn_async(self, engine: QueryEngine) -> None:
+        """One extraction call per substantive turn, off the hot path."""
+        model = getattr(self, "codebase_model", None)
+        if model is None or not getattr(self.config, "codebase_model_auto_learn", True):
+            return
+        messages = engine.last_turn_messages()
+        backend = engine.backend
+
+        def worker() -> None:
+            try:
+                from .core.codebase_model.learn import learn_from_turn
+
+                report = learn_from_turn(model, backend, messages)
+                if report.get("recorded"):
+                    self.writer.send({
+                        "type": "model_learned",
+                        "count": len(report["recorded"]),
+                        "ids": report["recorded"][:6],
+                    })
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, daemon=True, name="tether-model-learn").start()
 
     def _forward_stream_event(self, event: StreamEvent) -> None:
         turn_id = self._active_turn_id
@@ -673,6 +753,8 @@ class AppBridgeServer:
                         },
                         "diagnostic_output": clean_terminal_output(captured.getvalue()),
                     })
+                    if stop_reason not in ("cancelled", "error", "failed"):
+                        self._learn_from_turn_async(self.engine)
                 except Exception as exc:
                     self.writer.send({
                         "type": "turn_failed",

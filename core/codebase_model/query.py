@@ -99,8 +99,11 @@ class QuerySurface:
                 if node is not None and node.path:
                     paths.add(node.path)
             files = sorted(paths)
+        direct = self.indexer.blast_radius(target, max_depth=1) if not file_nodes else []
         return {"target": target, "affected_symbols": symbols,
-                "affected_files": files, "count": len(symbols)}
+                "affected_files": files, "count": len(symbols),
+                "direct_callers": direct,
+                "direct_files": sorted({d.split("::", 1)[0] for d in direct})}
 
     # -- owns (descriptive recall) ----------------------------------------
     def owns(self, topic: str) -> dict:

@@ -33,7 +33,39 @@ from .store import ModelStore
 
 # Directories never worth parsing. Pruned during discovery; ``*.egg-info`` is
 # matched by suffix below since the package name varies.
-_SKIP_DIRS = {".git", "__pycache__", "venv", ".venv", "node_modules"}
+_SKIP_DIRS = {
+    ".git", ".hg", ".svn", "__pycache__", "venv", ".venv", "env", "node_modules",
+    "build", "dist", "target", ".tox", ".mypy_cache", ".pytest_cache", ".ruff_cache",
+    "site-packages", ".next", ".nuxt", "coverage", ".cache",
+}
+
+
+def _git_ignored_dirs(repo_root) -> set[str]:
+    """Top-level-and-nested directories git ignores (repo-relative posix), so
+    wheels, ``build/``, ``dist/`` and friends never enter the substrate. Empty
+    when git is unavailable — the static skip list still applies."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(repo_root), "ls-files", "--others", "--ignored",
+             "--exclude-standard", "--directory", "-z"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    if out.returncode != 0:
+        return set()
+    return {
+        entry.rstrip("/") for entry in out.stdout.split("\0")
+        if entry.endswith("/")
+    }
+
+
+def _dotted_module(path: str) -> str:
+    """``core/codebase_model/store.py`` → ``core.codebase_model.store``."""
+    p = path[:-3] if path.endswith(".py") else path
+    if p.endswith("/__init__"):
+        p = p[: -len("/__init__")]
+    return p.replace("/", ".")
 
 
 class Indexer:
@@ -74,11 +106,15 @@ class Indexer:
         db_path = str(self.store.path)
         found: list[str] = []
         root = str(self.repo_root)
+        ignored = _git_ignored_dirs(self.repo_root)
         for dirpath, dirnames, filenames in os.walk(root):
-            # prune in place so os.walk doesn't descend into skipped trees
+            # prune in place so os.walk doesn't descend into skipped trees;
+            # git-ignored directories are build products, never source.
+            rel_dir = os.path.relpath(dirpath, root)
             dirnames[:] = [
                 d for d in dirnames
                 if d not in _SKIP_DIRS and not d.endswith(".egg-info")
+                and (PurePosixPath(Path(rel_dir) / d).as_posix() if rel_dir != "." else d) not in ignored
             ]
             for fn in filenames:
                 if not fn.endswith(".py") and language_for(fn) is None:
@@ -247,8 +283,13 @@ class Indexer:
 
     def _callers_of(self, node: Node) -> set[str]:
         """Caller node ids for ``node`` via CALLS edges keyed on its simple name.
-        We also try the full qualname so top-level functions (whose name == simple
-        name) and any future resolved edges are covered."""
+
+        The substrate records callees by simple name (``save``), so several
+        symbols can share a key. When that happens a caller only counts if it
+        can plausibly see *this* symbol: same file, or its module imports the
+        callee's module or the symbol itself. Unique names skip the check, so
+        precision improves without losing recall on the common case, and an
+        over-inclusive fallback remains for calls we cannot bind at all."""
         simple = node.name.split(".")[-1]
         callers: set[str] = set()
         for name in {node.name, simple}:
@@ -256,4 +297,38 @@ class Indexer:
                 continue
             for edge in self.store.edges_to(name, kind=EdgeKind.CALLS):
                 callers.add(edge.src)
-        return callers
+        if not callers or not simple:
+            return callers
+        rivals = [n for n in self.store.find_nodes_by_name(simple) if n.id != node.id]
+        if not rivals:
+            return callers  # unambiguous: every caller of this name means us
+        return {cid for cid in callers if self._caller_can_see(cid, node)}
+
+    def _caller_can_see(self, caller_id: str, node: Node) -> bool:
+        """Same file, or the caller's module imports the callee's module/symbol."""
+        caller_path = caller_id.split("::", 1)[0]
+        if caller_path == node.path:
+            return True
+        callee_dotted = _dotted_module(node.path)
+        callee_tail = callee_dotted.rsplit(".", 1)[-1] if callee_dotted else ""
+        simple = node.name.split(".")[-1]
+        for edge in self.store.edges_from(caller_path, kind=EdgeKind.IMPORTS):
+            target = (edge.dst or "").strip()
+            if not target:
+                continue
+            base, _, leaf = target.rpartition(".")
+            # ``import pkg.mod`` / ``from pkg import mod``: the module itself.
+            if target == callee_dotted or callee_dotted.endswith("." + target):
+                return True
+            # ``from pkg.mod import Anything``: anything imported *from* the
+            # callee's module makes its symbols reachable (methods are called
+            # on instances of the imported class).
+            if base and (base == callee_dotted or callee_dotted.endswith("." + base)):
+                return True
+            # ``from pkg import mod`` where mod is the callee's file.
+            if leaf == callee_tail and (not base or callee_dotted.endswith(base) or callee_dotted.endswith("." + base)):
+                return True
+            # ``from x import sym`` naming the symbol itself.
+            if leaf == simple:
+                return True
+        return False

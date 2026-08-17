@@ -1088,6 +1088,13 @@ export default function App() {
         break;
       }
 
+      case "model_learned": {
+        // Automatic learning recorded cited beliefs from the last turn.
+        const count = Math.trunc(asFiniteNumber(payload.count, 0));
+        if (count > 0) setActivity(`Learned ${count} fact${count === 1 ? "" : "s"} about this project`);
+        break;
+      }
+
       case "providers_updated":
         // Live model discovery finished (background); refresh the catalog
         // only — never disturb the open settings sheet or the active model.

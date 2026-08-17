@@ -35,10 +35,18 @@ project understanding stays **tethered to you**.
 > surface of work — not by repo size or history. None of it lives in the model,
 > so switching providers costs you nothing.
 >
-> There is a runnable test for whether this is real: delete the derived index,
-> disable grep and embeddings, and the agent must still answer *affects / owns
-> / allowed* from retained beliefs, re-fetching only the cited slices to
-> verify. It passes. Details below and in
+> Two runnable proofs, not a promise. (1) The retention test: delete the
+> derived index, disable grep and embeddings, and the agent must still answer
+> *affects / owns / allowed* from retained beliefs, re-fetching only the cited
+> slices to verify — it passes. (2) The cost test
+> ([`docs/persistence-benchmark.md`](docs/persistence-benchmark.md)): the same
+> model answering the same questions about this repo, with and without the
+> persistent model — **36% fewer tool calls, 32% fewer tokens, 20% faster,
+> and 100% vs 92% recall**; an "is this allowed?" question drops from 14 tool
+> calls to 4.5. Where the model has nothing recorded, consulting it costs a
+> little — the store has to be load-bearing, so Tether learns automatically:
+> after each substantive turn it records what the turn established, every
+> claim cited to a real file at the current commit. Details below and in
 > [`docs/codebase-mental-model/`](docs/codebase-mental-model/).
 
 Local-first, model-flexible, terminal and desktop. Run fully offline with
@@ -90,7 +98,11 @@ it learned. If it stalls, the beliefs were decoration. That test passes today
 `/persistence` in the REPL.
 
 **3. The system around the model compounds; the model is a commodity.**
-Skills, session history, approvals, tool traces, task checklists, and
+The store fills as a by-product of work: after each substantive turn a small
+extraction pass records durable, cited beliefs, invariants and decisions
+(`codebase_model_auto_learn`), the substrate re-indexes edited files, and the
+desktop builds the model in the background on first open. Skills, session
+history, approvals, tool traces, task checklists, and
 project-specific learning live in Tether and survive a provider switch. Growth is
 bounded by the *active surface area of work*, not by repo size or history, so
 the store stays small and honest as the code churns underneath it for years.
@@ -510,6 +522,7 @@ reasoning_effort          ""        # model-specific: none/low/medium/high/max/x
 thinking_mode             ""        # enabled/disabled for compatible APIs
 gguf_dirs                 []        # extra dirs from `tether models add-dir`
 codebase_model_enabled    true      # persistent codebase mental model (/persistence)
+codebase_model_auto_learn true      # record cited beliefs after each substantive turn
 ```
 
 By default Tether auto-approves read and file-edit operations so routine work doesn't get stuck behind repeated confirmation prompts. Shell commands and sub-agent launches still require approval unless you change the config.

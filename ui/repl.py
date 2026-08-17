@@ -7,6 +7,7 @@ import re
 import shlex
 import subprocess
 import sys
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -1136,7 +1137,8 @@ class TetherREPL:
                 rel = abs_p.resolve().relative_to(Path(root).resolve()).as_posix()
             except ValueError:
                 return  # edit outside the repo — not part of this model
-            if rel.endswith(".py"):
+            from ..core.codebase_model.substrate_generic import language_for
+            if rel.endswith(".py") or language_for(rel) is not None:
                 model.on_edit(rel)
         except Exception:
             pass
@@ -1778,6 +1780,24 @@ class TetherREPL:
         """Bookkeeping + a compact footer after each background turn."""
         eng = self._engine
         self.history.add("turn", f"tools={result.tool_calls_made} stop={result.stop_reason}")
+        # Automatic learning: one small extraction call per substantive turn,
+        # in the background, so the mental model fills as a by-product of work.
+        if (
+            eng is not None
+            and self.codebase_model is not None
+            and getattr(self.config, "codebase_model_auto_learn", True)
+            and result.stop_reason not in ("cancelled", "error", "failed")
+        ):
+            model, backend, messages = self.codebase_model, eng.backend, eng.last_turn_messages()
+
+            def _learn() -> None:
+                try:
+                    from ..core.codebase_model.learn import learn_from_turn
+                    learn_from_turn(model, backend, messages)
+                except Exception:
+                    pass
+
+            threading.Thread(target=_learn, daemon=True, name="tether-model-learn").start()
         tok_delta = 0
         if eng is not None:
             self.session.input_tokens = eng.usage.input_tokens

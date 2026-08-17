@@ -69,13 +69,17 @@ class ModelQueryTool(_ModelBoundTool):
     @property
     def description(self) -> str:
         return (
-            "Ask the persistent codebase model what it already knows, without "
-            "re-reading files. Actions: 'affects' (blast radius of a symbol or "
-            "*.py file — what an edit can reach), 'owns' (which component owns a "
-            "topic, from learned beliefs), 'allowed' (is a described change "
-            "permitted by recorded invariants / rejected patterns), and "
+            "Ask the persistent codebase model what it already knows — the FIRST "
+            "call for any question about callers, impact, ownership, or rules; "
+            "it is cheaper and more precise than grep. Actions: 'affects' (exact "
+            "callers / blast radius of a symbol like 'Class.method' or 'func', or "
+            "of a source file — from the indexed call graph, with the callers' "
+            "files), 'owns' (which component owns a topic, from learned, cited "
+            "beliefs), 'allowed' (is a described change permitted by recorded "
+            "invariants / rejected patterns, with the rule and its citation), and "
             "'architecture' (the small load-first index of modules, beliefs and "
-            "compiled invariants). 'affects', 'owns' and 'allowed' need `target`."
+            "compiled invariants). 'affects', 'owns' and 'allowed' need `target`. "
+            "Verify by reading only the cited slices afterwards."
         )
 
     @property
@@ -126,13 +130,25 @@ class ModelQueryTool(_ModelBoundTool):
     @staticmethod
     def _render_affects(res: dict) -> str:
         files = ", ".join(res["affected_files"]) or "no other files"
-        lines = [f"Changing {res['target']} affects {res['count']} symbol(s) "
-                 f"across: {files}."]
-        for sid in res["affected_symbols"][:25]:
-            lines.append(f"  - {sid}")
-        more = res["count"] - 25
-        if more > 0:
-            lines.append(f"  ... and {more} more")
+        lines = []
+        direct = res.get("direct_callers") or []
+        if direct:
+            lines.append(f"Direct callers of {res['target']} ({len(direct)}), from the indexed call graph:")
+            for sid in direct[:40]:
+                lines.append(f"  - {sid}")
+            if len(direct) > 40:
+                lines.append(f"  ... and {len(direct) - 40} more")
+            lines.append(f"Files with direct callers: {', '.join(res.get('direct_files') or []) or 'none'}")
+        elif res["count"] == 0:
+            lines.append(f"No indexed callers of {res['target']}. (Dynamic dispatch through registries "
+                         f"or getattr is not visible to the static call graph — grep if that is likely.)")
+        lines.append(f"Changing {res['target']} affects {res['count']} symbol(s) transitively across: {files}.")
+        if not direct:
+            for sid in res["affected_symbols"][:25]:
+                lines.append(f"  - {sid}")
+            more = res["count"] - 25
+            if more > 0:
+                lines.append(f"  ... and {more} more")
         return "\n".join(lines)
 
     @staticmethod

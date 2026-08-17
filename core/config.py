@@ -766,6 +766,10 @@ class TetherConfig:
     # off. write_approval gates the model_record write tool behind the normal
     # approval flow.
     codebase_model_enabled: bool = True
+    # After each substantive turn, one small extraction call records durable,
+    # cited beliefs/invariants/decisions so the store fills as a by-product of
+    # work (the "load-bearing" criterion). Off = only explicit model_record.
+    codebase_model_auto_learn: bool = True
     codebase_model_max_beliefs: int = 500
     codebase_model_max_files: int = 10000
     codebase_model_write_approval: bool = True
