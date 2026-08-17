@@ -1782,13 +1782,17 @@ class TetherREPL:
         self.history.add("turn", f"tools={result.tool_calls_made} stop={result.stop_reason}")
         # Automatic learning: one small extraction call per substantive turn,
         # in the background, so the mental model fills as a by-product of work.
+        backend = getattr(eng, "backend", None)
+        turn_messages = getattr(eng, "last_turn_messages", None)
         if (
             eng is not None
-            and self.codebase_model is not None
+            and backend is not None
+            and callable(turn_messages)
+            and getattr(self, "codebase_model", None) is not None
             and getattr(self.config, "codebase_model_auto_learn", True)
             and result.stop_reason not in ("cancelled", "error", "failed")
         ):
-            model, backend, messages = self.codebase_model, eng.backend, eng.last_turn_messages()
+            model, messages = self.codebase_model, turn_messages()
 
             def _learn() -> None:
                 try:
