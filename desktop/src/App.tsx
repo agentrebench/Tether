@@ -2934,15 +2934,23 @@ const MessageView = memo(function MessageView({
     // line ("I'll review the core files — reading X, Y, Z."); a long first
     // text after tools is reasoning/narration and belongs inside the tool
     // cards, not in the reader's face.
+    // An opening statement is short by nature ("I'll review X, Y, Z."). A long
+    // first text before the tools is a draft answer or reasoning — that is
+    // narration too, and it lives inside the cards.
     const firstText = list.findIndex((segment) => segment.kind === "text" && segment.text.trim());
     const firstTextIsShort = firstText >= 0
       && list[firstText].kind === "text"
       && (list[firstText] as { kind: "text"; text: string }).text.trim().length <= OPENING_STATEMENT_MAX_CHARS;
-    const openingEnd = firstText >= 0 && firstText < lastTools && (firstText < firstTools || firstTextIsShort)
+    const openingEnd = firstText >= 0 && firstText < lastTools && firstTextIsShort
       ? firstText + 1
       : firstTools;
-    const opening = list.slice(0, openingEnd);
-    const middle = list.slice(openingEnd, lastTools + 1);
+    // Everything up to openingEnd that is NOT the short opening line (i.e. a
+    // long draft written before the first tool call) is folded into the
+    // middle so it becomes card narration rather than page prose.
+    const openingRaw = list.slice(0, openingEnd);
+    const opening = openingRaw.filter((segment) => segment.kind !== "text" || segment.text.trim().length <= OPENING_STATEMENT_MAX_CHARS);
+    const demoted = openingRaw.filter((segment) => segment.kind === "text" && segment.text.trim().length > OPENING_STATEMENT_MAX_CHARS);
+    const middle = [...demoted, ...list.slice(openingEnd, lastTools + 1)];
     const closing = list.slice(lastTools + 1);
     // Every tool call after the opening is folded into ONE aggregated block
     // (bash ×5, file read ×3 …) that keeps growing while the turn runs. The
@@ -2969,11 +2977,16 @@ const MessageView = memo(function MessageView({
           : renderToolBlock(segment.activities, `tools-${index}`)
       )),
       stack.length > 0 ? <div className="tool-activities" key="tool-stack">{stack}</div> : null,
-      ...closing.map((segment, offset) => (
-        segment.kind === "text" && segment.text
-          ? <MarkdownView key={`text-${lastTools + 1 + offset}`} text={segment.text} onOpenPath={onOpenPath} />
-          : null
-      )),
+      ...closing.map((segment, offset) => {
+        if (segment.kind !== "text" || !segment.text) return null;
+        // While the turn is still running, text after the tool block may be
+        // the answer or just "let me check X…" before the next call. Show it
+        // as a quiet live line; it becomes the full-size answer on completion.
+        if (message.streaming) {
+          return <p className="tool-live-text" key={`live-${lastTools + 1 + offset}`}>{segment.text.trim()}</p>;
+        }
+        return <MarkdownView key={`text-${lastTools + 1 + offset}`} text={segment.text} onOpenPath={onOpenPath} />;
+      }),
     ];
   };
   return (

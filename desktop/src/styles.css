@@ -310,6 +310,7 @@ button { color: inherit; }
 .tool-activities { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
 /* Prose that follows a tool batch (the final answer, or interstitial text) needs the same breathing room. */
 .tool-activities + * { margin-top: 12px; }
+.tool-live-text { margin: 10px 2px 0; color: var(--muted); font-size: 12px; line-height: 1.5; white-space: pre-wrap; }
 .tool-activity { overflow: hidden; border: 1px solid var(--line); border-radius: 8px; background: rgba(255,255,255,.018); }
 .tool-activity.running { border-color: rgba(155,124,246,.42); background: rgba(155,124,246,.09); box-shadow: inset 2px 0 var(--purple); }
 .tool-activity summary { display: grid; grid-template-columns: 7px minmax(0,1fr) auto; gap: 8px; align-items: center; padding: 7px 9px; cursor: pointer; list-style: none; user-select: none; }
