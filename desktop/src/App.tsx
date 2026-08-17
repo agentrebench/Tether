@@ -2647,8 +2647,13 @@ const MessageView = memo(function MessageView({
     }
     let lastTools = -1;
     list.forEach((segment, index) => { if (segment.kind === "tools") lastTools = index; });
-    const opening = list.slice(0, firstTools);
-    const middle = list.slice(firstTools, lastTools + 1);
+    // The model's FIRST prose is its opening statement no matter what ran
+    // before it (turns often begin with an automatic model_query/bash), so it
+    // renders full-size; only prose between LATER tool batches is narration.
+    const firstText = list.findIndex((segment) => segment.kind === "text" && segment.text.trim());
+    const openingEnd = firstText >= 0 && firstText < lastTools ? firstText + 1 : firstTools;
+    const opening = list.slice(0, openingEnd);
+    const middle = list.slice(openingEnd, lastTools + 1);
     const closing = list.slice(lastTools + 1);
     const stack = middle.flatMap((segment, offset) => (
       segment.kind === "tools"
@@ -2659,9 +2664,9 @@ const MessageView = memo(function MessageView({
     ));
     return [
       ...opening.map((segment, index) => (
-        segment.kind === "text" && segment.text
-          ? <MarkdownView key={`text-${index}`} text={segment.text} onOpenPath={onOpenPath} />
-          : null
+        segment.kind === "text"
+          ? (segment.text ? <MarkdownView key={`text-${index}`} text={segment.text} onOpenPath={onOpenPath} /> : null)
+          : renderToolBlock(segment.activities, `tools-${index}`)
       )),
       stack.length > 0 ? <div className="tool-activities" key="tool-stack">{stack}</div> : null,
       ...closing.map((segment, offset) => (
