@@ -185,3 +185,56 @@ class LiveModelDiscovery(unittest.TestCase):
         k = self.cfg._version_sort_key
         order = sorted(["gpt-5.4-mini", "gpt-5.5", "gpt-5.4", "gpt-5.10"], key=k, reverse=True)
         self.assertEqual(order, ["gpt-5.10", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini"])
+
+
+class CodexCatalogFromCliCache(unittest.TestCase):
+    """The Codex picker mirrors the Codex CLI's own models_cache.json."""
+
+    def setUp(self):
+        import json, tempfile
+        from tether.core import config as cfg
+        self.cfg = cfg
+        self.tmp = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+        json.dump({"models": [
+            {"slug": "gpt-9.1-nova", "display_name": "GPT-9.1-Nova", "priority": 1, "visibility": "list",
+             "context_window": 300000, "default_reasoning_level": "medium",
+             "supported_reasoning_levels": [{"effort": "low"}, {"effort": "medium"}, {"effort": "ultra"}]},
+            {"slug": "hidden-thing", "priority": 0, "visibility": "hide"},
+            {"slug": "gpt-5.5", "display_name": "GPT-5.5", "priority": 7, "visibility": "list",
+             "supported_reasoning_levels": [{"effort": "low"}, {"effort": "high"}]},
+        ]}, self.tmp)
+        self.tmp.close()
+        self.orig = cfg.CODEX_MODELS_CACHE
+        cfg.CODEX_MODELS_CACHE = __import__("pathlib").Path(self.tmp.name)
+        cfg._codex_models_cache.clear()
+
+    def tearDown(self):
+        import os
+        self.cfg.CODEX_MODELS_CACHE = self.orig
+        self.cfg._codex_models_cache.clear()
+        os.unlink(self.tmp.name)
+
+    def test_cache_drives_order_metadata_and_selection(self):
+        config = TetherConfig()
+        models = self.cfg.provider_models("codex", config)
+        ids = [m["id"] for m in models]
+        self.assertEqual(ids[:2], ["gpt-9.1-nova", "gpt-5.5"])   # CLI priority order
+        self.assertNotIn("hidden-thing", ids)
+        nova = models[0]
+        self.assertEqual(nova["reasoning_efforts"], ["low", "medium", "ultra"])
+        self.assertEqual(nova["default_reasoning_effort"], "medium")
+        self.assertEqual(nova["context_size"], 300000)
+        self.cfg.apply_provider_selection(config, "codex", "gpt-9.1-nova", reasoning_effort="ultra")
+        self.assertEqual((config.api_model, config.reasoning_effort, config.context_size),
+                         ("gpt-9.1-nova", "ultra", 300000))
+
+    def test_codex_backend_passes_reasoning_effort(self):
+        from tether.engine.codex_backend import CodexExecBackend as CodexBackend
+        config = TetherConfig()
+        self.cfg.apply_provider_selection(config, "codex", "gpt-9.1-nova", reasoning_effort="ultra")
+        backend = CodexBackend.__new__(CodexBackend)
+        backend.config = config
+        backend.cwd = "."
+        _, cmd, _, _ = backend._build_exec_cmd("codex", json_mode=True)
+        self.assertIn("gpt-9.1-nova", cmd)
+        self.assertIn('model_reasoning_effort="ultra"', cmd)

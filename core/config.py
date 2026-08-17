@@ -44,18 +44,61 @@ REMOTE_PROVIDERS = {
         # billing. api_* fields are retained so existing profile plumbing can
         # switch to it like any other provider.
         "api_base_url": "",
-        "api_model": "gpt-5.5",
+        "api_model": "gpt-5.6-sol",
         "api_key_env": "",
-        "context_size": 400_000,
+        "context_size": 272_000,
         "max_budget_tokens": 100_000_000,
         "omit_sampling": True,
         "requires_api_key": False,
+        # Static fallback only: the live list (ids, reasoning levels, defaults,
+        # context) is read from the Codex CLI's own ~/.codex/models_cache.json
+        # by discover_provider_models("codex"), so new Codex models appear
+        # without a Tether update.
         "models": [
+            {
+                "id": "gpt-5.6-sol",
+                "label": "GPT-5.6-Sol",
+                "description": "Codex default; fastest 5.6",
+                "context_size": 272_000,
+                "reasoning_efforts": ["low", "medium", "high", "xhigh", "max", "ultra"],
+                "default_reasoning_effort": "low",
+                "max_reasoning_effort": "ultra",
+            },
+            {
+                "id": "gpt-5.6-terra",
+                "label": "GPT-5.6-Terra",
+                "description": "Balanced 5.6",
+                "context_size": 272_000,
+                "reasoning_efforts": ["low", "medium", "high", "xhigh", "max", "ultra"],
+                "default_reasoning_effort": "medium",
+                "max_reasoning_effort": "ultra",
+            },
+            {
+                "id": "gpt-5.6-luna",
+                "label": "GPT-5.6-Luna",
+                "description": "Deepest 5.6",
+                "context_size": 272_000,
+                "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"],
+                "default_reasoning_effort": "medium",
+                "max_reasoning_effort": "max",
+            },
             {
                 "id": "gpt-5.5",
                 "label": "GPT-5.5",
-                "description": "Codex CLI default",
-                "context_size": 400_000,
+                "description": "Previous Codex default",
+                "context_size": 272_000,
+                "reasoning_efforts": ["low", "medium", "high", "xhigh"],
+                "default_reasoning_effort": "medium",
+                "max_reasoning_effort": "xhigh",
+            },
+            {
+                "id": "gpt-5.4",
+                "label": "GPT-5.4",
+                "description": "Older general-purpose model",
+                "context_size": 272_000,
+                "reasoning_efforts": ["low", "medium", "high", "xhigh"],
+                "default_reasoning_effort": "medium",
+                "max_reasoning_effort": "xhigh",
             },
         ],
     },
@@ -146,7 +189,7 @@ REMOTE_PROVIDERS = {
         # API (/v1/responses), which the current backend doesn't drive — they
         # 404 against /v1/chat/completions. Pick a -codex model only after
         # adding Responses-API support to engine/backend.py.
-        "api_model": "gpt-5.5",
+        "api_model": "gpt-5.6-sol",
         "api_key_env": "OPENAI_API_KEY",
         "context_size": 400_000,
         "max_budget_tokens": 100_000_000,
@@ -157,9 +200,36 @@ REMOTE_PROVIDERS = {
         "requires_api_key": True,
         "models": [
             {
+                "id": "gpt-5.6-sol",
+                "label": "GPT-5.6-Sol",
+                "description": "Newest GPT; fastest of the 5.6 family",
+                "context_size": 400_000,
+                "reasoning_efforts": ["none", "low", "medium", "high", "xhigh", "max"],
+                "default_reasoning_effort": "low",
+                "max_reasoning_effort": "max",
+            },
+            {
+                "id": "gpt-5.6-terra",
+                "label": "GPT-5.6-Terra",
+                "description": "Balanced 5.6 model",
+                "context_size": 400_000,
+                "reasoning_efforts": ["none", "low", "medium", "high", "xhigh", "max"],
+                "default_reasoning_effort": "medium",
+                "max_reasoning_effort": "max",
+            },
+            {
+                "id": "gpt-5.6-luna",
+                "label": "GPT-5.6-Luna",
+                "description": "Deepest-reasoning 5.6 model",
+                "context_size": 400_000,
+                "reasoning_efforts": ["none", "low", "medium", "high", "xhigh", "max"],
+                "default_reasoning_effort": "medium",
+                "max_reasoning_effort": "max",
+            },
+            {
                 "id": "gpt-5.5",
                 "label": "GPT-5.5",
-                "description": "Most capable GPT model",
+                "description": "Previous flagship GPT model",
                 "context_size": 400_000,
                 "reasoning_efforts": ["none", "low", "medium", "high", "xhigh"],
                 "default_reasoning_effort": "medium",
@@ -349,6 +419,60 @@ def _discovery_key(config: "TetherConfig", provider: str) -> str:
     return config.stored_api_key(provider)
 
 
+CODEX_MODELS_CACHE = Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser() / "models_cache.json"
+_codex_models_cache: dict[str, tuple[float, list[dict]]] = {}
+
+
+def codex_cache_models() -> list[dict]:
+    """Models the installed Codex CLI knows, from its own ``models_cache.json``.
+
+    Full catalog entries (id, label, description, reasoning levels, default,
+    context) ordered by Codex's own priority. Empty when the CLI has never
+    run or the file is unreadable — callers fall back to the static preset.
+    """
+    try:
+        path = CODEX_MODELS_CACHE
+        stamp = path.stat().st_mtime
+    except OSError:
+        return []
+    cached = _codex_models_cache.get(str(path))
+    if cached and cached[0] == stamp:
+        return copy.deepcopy(cached[1])
+    entries: list[dict] = []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        rows = data.get("models", []) if isinstance(data, dict) else []
+        rows = [r for r in rows if isinstance(r, dict) and r.get("visibility", "list") == "list"]
+        rows.sort(key=lambda r: (r.get("priority") is None, r.get("priority", 0)))
+        for row in rows:
+            slug = str(row.get("slug") or "").strip()
+            if not slug:
+                continue
+            efforts = [
+                str(level.get("effort"))
+                for level in row.get("supported_reasoning_levels", [])
+                if isinstance(level, dict) and level.get("effort")
+            ]
+            entry = {
+                "id": slug,
+                "label": str(row.get("display_name") or slug),
+                "description": " ".join(str(row.get("description") or "").split())[:120]
+                or "Reported by the Codex CLI",
+                "context_size": int(row.get("context_window") or 272_000),
+                "discovered": True,
+            }
+            if efforts:
+                entry["reasoning_efforts"] = efforts
+                default = str(row.get("default_reasoning_level") or "")
+                entry["default_reasoning_effort"] = default if default in efforts else efforts[0]
+                entry["max_reasoning_effort"] = efforts[-1]
+            entries.append(entry)
+    except (OSError, ValueError, TypeError):
+        entries = []
+    _codex_models_cache[str(path)] = (stamp, entries)
+    return copy.deepcopy(entries)
+
+
 def discover_provider_models(
     config: "TetherConfig",
     provider: str,
@@ -361,6 +485,8 @@ def discover_provider_models(
     Never raises: network errors, auth failures, and unexpected shapes all
     degrade to an empty list so the built-in catalog is still usable offline.
     """
+    if provider == "codex":
+        return [m["id"] for m in codex_cache_models()]
     endpoint = _models_endpoint(provider)
     if not endpoint or provider not in REMOTE_PROVIDERS:
         return []
@@ -399,6 +525,10 @@ def discover_provider_models(
 
 def _synthesized_model(provider: str, model_id: str) -> dict:
     """Build a catalog entry for a live-discovered id from the preset's default."""
+    if provider == "codex":
+        for entry in codex_cache_models():
+            if entry["id"] == model_id:
+                return entry
     preset = REMOTE_PROVIDERS.get(provider, {})
     template = next(
         (m for m in preset.get("models", []) if m.get("id") == preset.get("api_model")),
@@ -434,6 +564,13 @@ def provider_models(provider: str, config: "TetherConfig | None" = None) -> list
     known = copy.deepcopy(preset.get("models", []))
     if config is None:
         return known
+    if provider == "codex":
+        live = codex_cache_models()
+        if live:
+            live_ids = {m["id"] for m in live}
+            # Codex's own priority order is the intended order; keep static
+            # entries the CLI no longer lists at the end for continuity.
+            return live + [m for m in known if m.get("id") not in live_ids]
     known_ids = {m.get("id") for m in known}
     extra = [
         _synthesized_model(provider, model_id)
@@ -448,13 +585,15 @@ def provider_models(provider: str, config: "TetherConfig | None" = None) -> list
 
 
 def _version_sort_key(model_id: str) -> tuple:
-    parts = re.split(r"[-._]", model_id)
+    """Order by the numeric parts only (5.6 > 5.5 > 5.4-mini); words never
+    decide between two ids, so same-version siblings (sol/terra/luna) keep the
+    catalog's or the provider's own order under a stable sort."""
     key = []
-    for part in parts:
-        key.append((1, int(part), "") if part.isdigit() else (0, 0, part))
+    for part in re.findall(r"\d+|[A-Za-z]+", model_id):
+        key.append((1, int(part)) if part.isdigit() else (0, 0))
     # Terminal marker so a base id ("gpt-5.4") sorts above its variants
-    # ("gpt-5.4-mini") instead of below them.
-    key.append((1, -1, ""))
+    # ("gpt-5.4-mini") but below a longer version ("gpt-5.4.1").
+    key.append((1, -1))
     return tuple(key)
 
 
@@ -462,6 +601,10 @@ def provider_model(provider: str, model_id: str, config: "TetherConfig | None" =
     """Return model metadata from the catalog, or a synthesized entry for an id
     the provider reports live (only when ``config`` is given for discovery)."""
     preset = REMOTE_PROVIDERS.get(provider, {})
+    if provider == "codex":
+        for entry in codex_cache_models():
+            if entry["id"] == model_id:
+                return entry
     found = next(
         (model for model in preset.get("models", []) if model.get("id") == model_id),
         None,

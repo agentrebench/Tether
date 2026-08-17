@@ -23,7 +23,7 @@ from ..core.config import TetherConfig
 from ..core.models import Message, StreamEvent, ToolDefinition
 
 
-DEFAULT_CODEX_MODEL = "gpt-5.5"
+DEFAULT_CODEX_MODEL = "gpt-5.6-sol"
 DEFAULT_CODEX_TIMEOUT_SEC = 900
 DEFAULT_PROMPT_HISTORY_CHARS = 60_000
 
@@ -352,6 +352,11 @@ class CodexExecBackend:
             cmd.extend(["-o", str(out_path)])
         if model:
             cmd.extend(["-m", model])
+        # A transient override (plan mode) wins over the configured effort,
+        # exactly like the HTTP backend; Codex takes it as a config override.
+        effort = (getattr(self, "reasoning_effort_override", "") or self.config.reasoning_effort or "").strip()
+        if effort:
+            cmd.extend(["-c", f'model_reasoning_effort="{effort}"'])
         cmd.append("-")
         return exe, cmd, timeout, out_path
 
