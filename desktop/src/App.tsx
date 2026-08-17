@@ -1639,7 +1639,7 @@ export default function App() {
             <div className="brand-mark"><img src={appIcon} alt="" /></div>
             <div>
               <strong>TETHER</strong>
-              <span>Developer Console</span>
+              <span>Local-first coding agent</span>
             </div>
           </div>
           <div className="brand-controls">
