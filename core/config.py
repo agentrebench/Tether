@@ -268,7 +268,9 @@ REMOTE_PROVIDERS = {
         "label": "GLM",
         "description": "Z.AI GLM coding and agent models.",
         "api_base_url": "https://api.z.ai/api/paas/v4",
-        "api_model": "glm-5.3",
+        # glm-5.3 is listed by /models but gated per account (403 code 1220
+        # on use); default to 5.2, which every GLM plan can call.
+        "api_model": "glm-5.2",
         "api_key_env": "ZAI_API_KEY",
         "api_key_env_aliases": ["GLM_API_KEY"],
         "context_size": 202_752,
@@ -278,7 +280,7 @@ REMOTE_PROVIDERS = {
             {
                 "id": "glm-5.3",
                 "label": "GLM-5.3",
-                "description": "Newest flagship agent model",
+                "description": "Newest flagship (may require plan access)",
                 "context_size": 202_752,
                 "thinking_modes": ["enabled", "disabled"],
                 "default_thinking_mode": "enabled",

@@ -497,6 +497,32 @@ def save_memory(content: str) -> Path:
     return MEMORY_FILE
 
 
+def _describe_api_error(code: int, body: str, config) -> str:
+    """Turn the common provider refusals into one actionable sentence.
+
+    Providers list models in ``/models`` that a given account cannot call
+    (Z.AI code 1220, OpenAI ``model_not_found``, Anthropic ``permission``);
+    the raw JSON is kept in the log, the user gets told what to change.
+    """
+    lowered = (body or "").lower()
+    model = getattr(config, "api_model", "") or "the selected model"
+    provider = getattr(config, "provider", "") or "the provider"
+    if code in (401,):
+        return (f"Error: {provider} rejected the API key (401). Check the key in the "
+                f"runtime sheet or `tether key`.")
+    if code in (403, 404) and any(k in lowered for k in (
+        "permission", "not have access", "does not exist", "model_not_found",
+        "not found", "1220", "unsupported model", "invalid model",
+    )):
+        return (f"Error: your {provider} account cannot use `{model}` ({code}). "
+                f"It is listed by the provider but not enabled for this key/plan — "
+                f"pick another {provider} model in the runtime sheet (or `/model`).")
+    if code == 429:
+        return (f"Error: {provider} rate limit or quota reached (429) for `{model}`. "
+                f"Wait a moment or switch models.")
+    return ""
+
+
 class QueryEngine:
     def __init__(
         self,
@@ -954,8 +980,9 @@ class QueryEngine:
                 detail = raw_body[:300] if raw_body else "(no response body)"
                 self.logger.error(f"LLM API error: {e} - Detail: {detail}")
                 self._flush_read_buffer()
+                friendly = _describe_api_error(e.code, raw_body, self.config)
                 return TurnResult(
-                    output=f"Error: {e}\nDetail: {detail}",
+                    output=friendly or f"Error: {e}\nDetail: {detail}",
                     tool_calls_made=all_tool_calls,
                     usage=self.usage,
                     stop_reason="error",
