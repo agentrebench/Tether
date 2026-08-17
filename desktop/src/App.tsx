@@ -2980,9 +2980,12 @@ const MessageView = memo(function MessageView({
       ...closing.map((segment, offset) => {
         if (segment.kind !== "text" || !segment.text) return null;
         // While the turn is still running, text after the tool block may be
-        // the answer or just "let me check X…" before the next call. Show it
-        // as a quiet live line; it becomes the full-size answer on completion.
-        if (message.streaming) {
+        // the answer or just "let me check X…" before the next call. Narration
+        // is short; an answer keeps growing. So: stream it as a quiet live
+        // line only while it is short, and as full markdown — identical to the
+        // finished view — as soon as it is longer than an opening line. If a
+        // tool call follows after all, the text moves into that tool's card.
+        if (message.streaming && segment.text.trim().length <= OPENING_STATEMENT_MAX_CHARS) {
           return <p className="tool-live-text" key={`live-${lastTools + 1 + offset}`}>{segment.text.trim()}</p>;
         }
         return <MarkdownView key={`text-${lastTools + 1 + offset}`} text={segment.text} onOpenPath={onOpenPath} />;
