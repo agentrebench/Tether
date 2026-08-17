@@ -317,3 +317,17 @@ class BlastRadiusBinding(unittest.TestCase):
         b_callers = model.indexer.blast_radius("pkg/b.py::B.run", max_depth=1)
         self.assertEqual(a_callers, ["pkg/uses_a.py::go"])
         self.assertEqual(b_callers, ["pkg/uses_b.py::go"])
+
+
+class GroundingGuard(unittest.TestCase):
+    """A substantive answer about the project with zero tool calls gets one nudge."""
+
+    def test_fires_only_for_ungrounded_project_answers(self):
+        need = QueryEngine._needs_grounding
+        long = "Tether seems like a thoughtful local-first harness. " * 8
+        self.assertTrue(need("What do you think of this project?", long, "question", []))
+        self.assertTrue(need("Review the codebase and tell me what stands out", long, "review", []))
+        self.assertFalse(need("What do you think of this project?", long, "question", ["file_read"]))
+        self.assertFalse(need("What is a Python decorator?", long, "question", []))
+        self.assertFalse(need("What do you think of this project?", "Which part?", "question", []))
+        self.assertFalse(need("fix the bug in this repo", long, "edit", []))

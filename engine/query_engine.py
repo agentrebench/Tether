@@ -171,6 +171,8 @@ Platform: {platform}
 # enabled (config.codebase_model_enabled). It teaches the "consult before
 # retrieval" habit that is the whole point of the model.
 _CODEBASE_MODEL_GUIDANCE = """
+Ground every claim about THIS project in the repository. These instructions describe your tools, not the codebase; never describe or assess the project from them. When asked about the project, its design, quality, or "what you think", inspect first (model_query action="architecture", the README, the key modules) and cite what you actually read.
+
 Persistent codebase model — consult it BEFORE grep/read, then verify:
 - This repo has a persistent, queryable model of its own structure (an indexed call graph, ownership beliefs, invariants, rejected patterns). It is cheaper and more complete than rediscovering the codebase with grep, so it is your FIRST tool call for any question about callers, impact, ownership, or whether something is allowed.
 - Questions like "who calls X", "what does changing X affect", "which files use X": call model_query action="affects" target="<symbol or path>" FIRST — it returns the exact caller list from the indexed call graph (grep finds text matches, not calls, and misses nothing/over-matches). Then read only the specific cited slices you need to verify.
@@ -781,6 +783,7 @@ class QueryEngine:
         call, or before/after tool dispatch — once it is set."""
         self._cancel_event = cancel_event
         self._turn_start_index = len(self.messages)
+        self._grounding_nudged = False
         self._submission_plan_mode = bool(self.plan_mode)
         if self._submission_plan_mode:
             # Push reasoning-mode providers to max effort; sampling-only models
@@ -1040,6 +1043,27 @@ class QueryEngine:
             # If no tool calls, we're done
             if not assistant_msg.tool_calls:
                 final_text = assistant_msg.content or ""
+                if (
+                    not getattr(self, "_grounding_nudged", False)
+                    and self._needs_grounding(user_input, final_text, task_intent, all_tool_calls)
+                ):
+                    self._grounding_nudged = True
+                    sys.stdout.write(f"\n  {YELLOW}[grounding guard: answered about the project without inspecting it]{RESET}\n")
+                    sys.stdout.flush()
+                    self.messages.append(Message(
+                        role="user",
+                        content=(
+                            "[SYSTEM OVERRIDE — GROUND YOUR ANSWER IN THE REPOSITORY]\n\n"
+                            "You answered a question about this project without inspecting a single file. "
+                            "Your instructions describe your tools, not this codebase; an assessment based on "
+                            "them is a guess.\n\n"
+                            "Before answering: call model_query action=\"architecture\" if available, read the "
+                            "README and the modules that matter for the question, then answer citing what you "
+                            "actually read (file paths). Keep what still holds from your draft; correct the rest."
+                        ),
+                    ))
+                    continue
+
                 if not self._submission_plan_mode and self._should_continue_after_text_response(
                     latest_user_input=user_input,
                     latest_assistant_text=final_text,
@@ -2232,6 +2256,31 @@ class QueryEngine:
             "need the user", "waiting for",
         )
         return any(marker in lowered for marker in blocker_markers)
+
+    _ABOUT_PROJECT_RE = re.compile(
+        r"\b(this|the|our|my|your)\s+(project|codebase|code\s*base|repo|repository|code|app|"
+        r"application|architecture|design|implementation|source)\b"
+        r"|\b(codebase|repository)\b|\bthis repo\b|\bwhat do you think of\b|\bthoughts on\b",
+        re.IGNORECASE,
+    )
+
+    @staticmethod
+    def _needs_grounding(
+        latest_user_input: str,
+        latest_assistant_text: str,
+        task_intent: str,
+        all_tool_calls: list[str],
+    ) -> bool:
+        """A substantive answer *about the project* given without a single tool
+        call is almost always the model describing its own instructions (or
+        guessing). One nudge to go look; never more than one per submission."""
+        if all_tool_calls:
+            return False
+        if task_intent not in {"question", "review"}:
+            return False
+        if len((latest_assistant_text or "").strip()) < 200:
+            return False  # short replies / clarifying questions are fine
+        return bool(QueryEngine._ABOUT_PROJECT_RE.search(latest_user_input or ""))
 
     @staticmethod
     def _should_continue_after_text_response(
