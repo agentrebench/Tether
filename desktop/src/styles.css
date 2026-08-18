@@ -425,6 +425,17 @@ button { color: inherit; }
 .composer .slash-button:hover:not(:disabled),
 .composer.slash-open .slash-button:not(.attach-button) { border-color: rgba(155,124,246,.38); background: var(--purple); color: white; }
 .composer-side { display: flex; flex-direction: column; gap: 6px; align-items: center; }
+.attach-wrap { position: relative; }
+.attach-backdrop { position: fixed; inset: 0; z-index: 4; }
+.composer .attach-button.open { border-color: rgba(155,124,246,.38); background: var(--purple); color: white; }
+.attach-menu { position: absolute; left: 0; bottom: calc(100% + 8px); z-index: 5; min-width: 240px; display: flex; flex-direction: column; gap: 2px; padding: 6px; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--panel-raised); box-shadow: 0 16px 40px rgba(0,0,0,.4); }
+.attach-menu button { display: grid; grid-template-columns: 16px 1fr; gap: 8px; align-items: center; width: 100%; padding: 8px 9px; text-align: left; border: 0; border-radius: 7px; background: transparent; color: var(--text); font-size: 12px; cursor: pointer; }
+.attach-menu button small { grid-column: 2; color: var(--muted); font-size: 10px; }
+.attach-menu button:hover { background: var(--purple-soft); }
+.attach-hint { padding: 6px 9px 4px; color: var(--muted-2); font-size: 10px; }
+.composer { position: relative; }
+.composer.drop-active { border-color: var(--purple); box-shadow: 0 0 0 3px rgba(155,124,246,.25); }
+.drop-overlay { position: absolute; inset: 0; z-index: 4; display: flex; align-items: center; justify-content: center; gap: 8px; border-radius: 13px; background: rgba(155,124,246,.12); color: var(--purple-bright); font-size: 13px; font-weight: 600; pointer-events: none; }
 .attachment-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
 .attachment-chip { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 4px 8px 4px 7px; border: 1px solid rgba(155,124,246,.3); border-radius: 999px; background: var(--purple-soft); color: var(--purple-bright); font-size: 11px; line-height: 1.2; }
 .attachment-chip > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 260px; }

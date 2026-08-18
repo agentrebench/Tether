@@ -356,6 +356,71 @@ def _extract_pdf_text(path: Path) -> tuple[str, str]:
                 "`pipx inject tether pypdf` (or Homebrew `poppler` for pdftotext)")
 
 
+_DIR_SKIP = {".git", ".hg", ".svn", "node_modules", "__pycache__", ".venv", "venv", "env",
+             "dist", "build", "target", ".next", ".cache", ".pytest_cache", ".mypy_cache",
+             ".ruff_cache", "coverage", ".idea", ".vscode", ".DS_Store"}
+_DIR_MAX_FILES = 60
+_DIR_MAX_TOTAL_CHARS = 300_000
+_DIR_MAX_FILE_CHARS = 40_000
+_DIR_MAX_TREE_LINES = 400
+_DIR_PRIORITY = ("readme", "readme.md", "package.json", "pyproject.toml", "cargo.toml", "go.mod",
+                 "makefile", "dockerfile", "docker-compose.yml", "requirements.txt", "setup.py")
+
+
+def _attach_directory(root: Path, name: str) -> tuple[str, str]:
+    """A bounded snapshot of a folder: the tree, then the contents of the most
+    informative text files (READMEs/manifests first, then smallest-first) up to
+    the caps. Returns (block, detail)."""
+    tree: list[str] = []
+    candidates: list[tuple[int, int, Path]] = []  # (priority, size, path)
+    total_files = 0
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(d for d in dirnames if d not in _DIR_SKIP and not d.startswith("."))
+        rel_dir = Path(dirpath).relative_to(root)
+        depth = len(rel_dir.parts)
+        if len(tree) < _DIR_MAX_TREE_LINES:
+            tree.append(("  " * depth) + (rel_dir.name + "/" if depth else name + "/"))
+        for fn in sorted(filenames):
+            if fn in _DIR_SKIP or fn.startswith("."):
+                continue
+            total_files += 1
+            path = Path(dirpath) / fn
+            if len(tree) < _DIR_MAX_TREE_LINES:
+                tree.append(("  " * (depth + 1)) + fn)
+            ext = path.suffix.lower()
+            if ext in _TEXT_EXTENSIONS or ext == "" and fn.lower() in _DIR_PRIORITY:
+                try:
+                    size = path.stat().st_size
+                except OSError:
+                    continue
+                if size > 2_000_000:
+                    continue
+                priority = 0 if fn.lower() in _DIR_PRIORITY else 1
+                candidates.append((priority, size, path))
+    if len(tree) >= _DIR_MAX_TREE_LINES:
+        tree.append("… (tree truncated)")
+    candidates.sort()
+    parts = [f"Folder tree ({total_files} files):\n```\n" + "\n".join(tree) + "\n```"]
+    used = 0
+    included = 0
+    for _, _, path in candidates:
+        if included >= _DIR_MAX_FILES or used >= _DIR_MAX_TOTAL_CHARS:
+            break
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        text = text[:_DIR_MAX_FILE_CHARS]
+        rel = path.relative_to(root).as_posix()
+        parts.append(f"--- {rel} ---\n```{path.suffix.lstrip('.')}\n{text}\n```")
+        used += len(text)
+        included += 1
+    remaining = len(candidates) - included
+    if remaining > 0:
+        parts.append(f"… {remaining} more text file(s) not inlined (size caps). Ask for specific paths if needed.")
+    return "\n\n".join(parts), f"folder · {total_files} files, {included} inlined"
+
+
 def resolve_attachments(prompt: str, attachments: list[dict]) -> tuple[str, list[str], list[dict]]:
     """Fold attachments into the prompt. Returns (prompt, images, notes)
     where notes are per-attachment outcomes for the app to display."""
@@ -378,6 +443,13 @@ def resolve_attachments(prompt: str, attachments: list[dict]) -> tuple[str, list
                 note["detail"] = f"{lines} lines"
             else:
                 path = Path(str(item.get("path") or "")).expanduser()
+                if path.is_dir():
+                    block, detail = _attach_directory(path, name)
+                    blocks.append(f"[Attached folder {index}: {name} ({path})]\n{block}")
+                    note["detail"] = detail
+                    total += len(blocks[-1])
+                    notes.append(note)
+                    continue
                 if not path.is_file():
                     raise FileNotFoundError(f"not a file: {path}")
                 ext = path.suffix.lower()

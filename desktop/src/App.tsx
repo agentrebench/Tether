@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   AlertTriangle,
@@ -27,6 +28,7 @@ import {
   MessageSquarePlus,
   Moon,
   Paperclip,
+  FolderPlus,
   FileText,
   Image as ImageIcon,
   ClipboardList,
@@ -1481,6 +1483,22 @@ export default function App() {
     }
   };
 
+  const addAttachmentPaths = useCallback((paths: string[]) => {
+    if (paths.length === 0) return;
+    setAttachments((current) => [
+      ...current,
+      ...paths
+        .filter((path) => path && !current.some((a) => a.path === path))
+        .map((path) => ({ id: uid(), kind: "file" as const, name: basename(path), path })),
+    ]);
+  }, []);
+
+  const attachFolder = async () => {
+    const selection = await open({ directory: true, multiple: true, title: "Attach a folder" });
+    const paths = Array.isArray(selection) ? selection : typeof selection === "string" ? [selection] : [];
+    addAttachmentPaths(paths);
+  };
+
   const attachFiles = async () => {
     const selection = await open({
       multiple: true,
@@ -1493,14 +1511,29 @@ export default function App() {
       ],
     });
     const paths = Array.isArray(selection) ? selection : typeof selection === "string" ? [selection] : [];
-    if (paths.length === 0) return;
-    setAttachments((current) => [
-      ...current,
-      ...paths
-        .filter((path) => !current.some((a) => a.path === path))
-        .map((path) => ({ id: uid(), kind: "file" as const, name: basename(path), path })),
-    ]);
+    addAttachmentPaths(paths);
   };
+
+  // Native drag-and-drop from Finder/Explorer: Tauri delivers real paths.
+  const [dropActive, setDropActive] = useState(false);
+  useEffect(() => {
+    let unlisten: UnlistenFn | undefined;
+    void (async () => {
+      try {
+        unlisten = await getCurrentWebview().onDragDropEvent((event) => {
+          if (event.payload.type === "enter" || event.payload.type === "over") setDropActive(true);
+          else if (event.payload.type === "leave") setDropActive(false);
+          else if (event.payload.type === "drop") {
+            setDropActive(false);
+            addAttachmentPaths(event.payload.paths);
+          }
+        });
+      } catch {
+        // drag-drop unavailable (e.g. web preview) — the button still works
+      }
+    })();
+    return () => { unlisten?.(); };
+  }, [addAttachmentPaths]);
 
   const addPasteAttachment = (text: string) => {
     const lines = text.split(/\r?\n/).length;
@@ -2007,6 +2040,8 @@ export default function App() {
               send={() => void sendMessage()}
               attachments={attachments}
               onAttachFiles={() => void attachFiles()}
+              onAttachFolder={() => void attachFolder()}
+              dropActive={dropActive}
               onPasteText={addPasteAttachment}
               onRemoveAttachment={(id) => setAttachments((current) => current.filter((a) => a.id !== id))}
             />
@@ -3514,6 +3549,7 @@ const PASTE_CHIP_MIN_CHARS = 600;
 
 function attachmentIcon(attachment: ComposerAttachment) {
   if (attachment.kind === "paste") return <ClipboardList size={12} />;
+  if (attachment.detail?.startsWith("folder") || (attachment.path && !attachment.name.includes("."))) return <Folder size={12} />;
   const ext = (attachment.name.split(".").pop() || "").toLowerCase();
   if (["png", "jpg", "jpeg", "gif", "webp"].includes(ext)) return <ImageIcon size={12} />;
   if (ext === "pdf" || ext === "md" || ext === "txt") return <FileText size={12} />;
@@ -3560,6 +3596,8 @@ function Composer({
   send,
   attachments,
   onAttachFiles,
+  onAttachFolder,
+  dropActive,
   onPasteText,
   onRemoveAttachment,
 }: {
@@ -3572,9 +3610,12 @@ function Composer({
   send: () => void;
   attachments: ComposerAttachment[];
   onAttachFiles: () => void;
+  onAttachFolder: () => void;
+  dropActive: boolean;
   onPasteText: (text: string) => void;
   onRemoveAttachment: (id: string) => void;
 }) {
+  const [attachMenuOpen, setAttachMenuOpen] = useState(false);
   const [slashMenuOpen, setSlashMenuOpen] = useState(false);
   const [cursorPosition, setCursorPosition] = useState(value.length);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -3681,7 +3722,8 @@ function Composer({
           ))}
         </div>
       )}
-      <div className={`composer ${showSlashMenu ? "slash-open" : ""} ${attachments.length > 0 ? "has-attachments" : ""}`}>
+      <div className={`composer ${showSlashMenu ? "slash-open" : ""} ${attachments.length > 0 ? "has-attachments" : ""} ${dropActive ? "drop-active" : ""}`}>
+        {dropActive && <div className="drop-overlay" aria-hidden="true"><FolderPlus size={18} /> Drop to attach</div>}
         <div className="composer-side">
           <button
             type="button"
@@ -3693,16 +3735,33 @@ function Composer({
           >
             <TerminalSquare size={15} />
           </button>
-          <button
-            type="button"
-            className="slash-button attach-button"
-            onClick={onAttachFiles}
-            disabled={disabled}
-            aria-label="Attach files"
-            title="Attach files: code, text, markdown, PDF, images"
-          >
-            <Paperclip size={15} />
-          </button>
+          <div className="attach-wrap">
+            <button
+              type="button"
+              className={`slash-button attach-button ${attachMenuOpen ? "open" : ""}`}
+              onClick={() => setAttachMenuOpen((open) => !open)}
+              disabled={disabled}
+              aria-label="Attach files or a folder"
+              aria-expanded={attachMenuOpen}
+              title="Attach files or a folder — or drag them onto the window"
+            >
+              <Paperclip size={15} />
+            </button>
+            {attachMenuOpen && <div className="attach-backdrop" onMouseDown={() => setAttachMenuOpen(false)} aria-hidden="true" />}
+            {attachMenuOpen && (
+              <div className="attach-menu" role="menu">
+                <button type="button" role="menuitem" onClick={() => { setAttachMenuOpen(false); onAttachFiles(); }}>
+                  <FileText size={13} /> Files…
+                  <small>code, text, markdown, PDF, images</small>
+                </button>
+                <button type="button" role="menuitem" onClick={() => { setAttachMenuOpen(false); onAttachFolder(); }}>
+                  <FolderPlus size={13} /> Folder…
+                  <small>tree + text contents (bounded)</small>
+                </button>
+                <span className="attach-hint">or drag & drop anywhere</span>
+              </div>
+            )}
+          </div>
         </div>
         <div className="command-input-wrap">
           <AttachmentChips attachments={attachments} onRemove={onRemoveAttachment} />
