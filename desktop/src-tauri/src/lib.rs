@@ -553,6 +553,18 @@ fn run_setup_step(
     Ok(())
 }
 
+/// `~/.tether/scratch` (or `$TETHER_CONFIG_DIR/scratch`) — the workspace used
+/// when no project is selected.
+fn scratch_workspace_dir() -> Result<PathBuf, String> {
+    if let Ok(configured) = env::var("TETHER_CONFIG_DIR") {
+        if !configured.trim().is_empty() {
+            return Ok(PathBuf::from(configured).join("scratch"));
+        }
+    }
+    let home = env::var("HOME").map_err(|_| "HOME is not set".to_string())?;
+    Ok(PathBuf::from(home).join(".tether").join("scratch"))
+}
+
 fn locate_tether() -> Result<PathBuf, String> {
     if let Ok(configured) = env::var("TETHER_CLI") {
         let path = PathBuf::from(configured);
@@ -634,6 +646,17 @@ fn start_bridge(
     project: String,
     bridge_id: String,
 ) -> Result<String, String> {
+    // No project chosen: run a general session in a private scratch
+    // workspace so the app is usable the moment it opens. Tools are confined
+    // there; the user can pick a real project any time.
+    let project = if project.trim().is_empty() {
+        let scratch = scratch_workspace_dir()?;
+        fs::create_dir_all(&scratch)
+            .map_err(|error| format!("Could not create the scratch workspace: {error}"))?;
+        scratch.display().to_string()
+    } else {
+        project
+    };
     let project_path = PathBuf::from(&project)
         .canonicalize()
         .map_err(|error| format!("Project directory is unavailable: {error}"))?;

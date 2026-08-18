@@ -214,7 +214,8 @@ def bridge_status(
         "protocol": 3,
         "version": __version__,
         "project": str(project),
-        "project_name": project.name,
+        "project_name": "General session" if is_scratch_workspace(project) else project.name,
+        "scratch": is_scratch_workspace(project),
         "provider": provider,
         "model": model,
         "context_size": config.context_size,
@@ -250,6 +251,18 @@ def bridge_status(
             "slash_commands": True,
         },
     }
+
+
+SCRATCH_WORKSPACE = CONFIG_DIR / "scratch"
+
+
+def is_scratch_workspace(path: Path | str) -> bool:
+    """The desktop's no-project workspace: a general session, tools confined
+    to ~/.tether/scratch, no codebase model."""
+    try:
+        return Path(path).expanduser().resolve() == SCRATCH_WORKSPACE.resolve()
+    except OSError:
+        return False
 
 
 def _same_model_file(served: str, selected: str) -> bool:
@@ -503,6 +516,8 @@ class AppBridgeServer:
         self.codebase_model = None
         if not getattr(self.config, "codebase_model_enabled", False):
             return
+        if is_scratch_workspace(self.project):
+            return  # a general session has no codebase to model
         try:
             from .core.codebase_model.service import _resolve_root, get_model, set_default_verifier
             from .core.codebase_model.verify import llm_verifier

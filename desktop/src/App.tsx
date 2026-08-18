@@ -1299,7 +1299,7 @@ export default function App() {
     discardQueuedText();
     agentSnapshotsRef.current.clear();
     approvalInFlightRef.current = "";
-    setProjectPath(path);
+    setProjectPath(path || null);
     setConnection("connecting");
     setMessages([]);
     setTodos([]);
@@ -1325,7 +1325,8 @@ export default function App() {
     setPreviewError("");
     autoFollowRef.current = true;
     setFollowingOutput(true);
-    localStorage.setItem(PROJECT_STORAGE_KEY, path);
+    if (path) localStorage.setItem(PROJECT_STORAGE_KEY, path);
+    else localStorage.removeItem(PROJECT_STORAGE_KEY);
     try {
       await invoke<string>("start_bridge", { project: path, bridgeId });
     } catch (caught) {
@@ -1388,8 +1389,9 @@ export default function App() {
         setSetupOpen(true);
         return; // connecting would just fail; the setup dialog continues for us
       }
+      // No saved project → general session on the scratch workspace.
       const savedProject = localStorage.getItem(PROJECT_STORAGE_KEY);
-      if (savedProject) await connectProject(savedProject);
+      await connectProject(savedProject ?? "");
     })();
 
     return () => {
@@ -1697,7 +1699,7 @@ export default function App() {
     return "Choose a project";
   }, [connection]);
 
-  const projectName = projectPath ? basename(projectPath) : "No project";
+  const projectName = projectPath ? basename(projectPath) : "General session";
   const providerLabel = providers.find((item) => item.id === provider)?.label ?? provider;
   const modelLabel = providers
     .find((item) => item.id === provider)
@@ -1903,14 +1905,12 @@ export default function App() {
       </aside>
 
       <main className="main-panel">
-        {!projectPath ? (
-          <ProjectWelcome onChoose={() => void chooseProject()} />
-        ) : (
+        {(
           <>
             <header className="topbar" data-tauri-drag-region>
               <div className="project-heading" data-tauri-drag-region>
-                <strong>{projectName}</strong>
-                <span>{projectPath}</span>
+                <strong>{projectPath ? projectName : "General session"}</strong>
+                <span>{projectPath ?? "No project selected — files land in ~/.tether/scratch. Choose a project to work on a codebase."}</span>
               </div>
               <div className="topbar-actions">
                 {working && (
@@ -2046,7 +2046,7 @@ export default function App() {
             setSetupOpen(false);
             setError(null);
             const savedProject = localStorage.getItem(PROJECT_STORAGE_KEY);
-            if (savedProject) void connectProject(savedProject);
+            void connectProject(savedProject ?? "");
           }}
         />
       )}
@@ -2840,22 +2840,6 @@ function RuntimeDialog({
   );
 }
 
-function ProjectWelcome({ onChoose }: { onChoose: () => void }) {
-  return (
-    <div className="welcome" data-tauri-drag-region>
-      <div className="welcome-orbit"><img src={appIcon} alt="" /></div>
-      <div>
-        <h1>Give Tether a workspace</h1>
-        <p>
-          Choose a repository or project folder. The engine, tools, and approvals stay scoped to that workspace.
-        </p>
-      </div>
-      <button className="welcome-button" onClick={onChoose}>
-        <FolderOpen size={18} /> Choose project
-      </button>
-    </div>
-  );
-}
 
 function EmptyConversation({ onSuggestion }: { onSuggestion: (value: string) => void }) {
   const suggestions = [
@@ -3737,7 +3721,7 @@ function Composer({
                 send();
               }
             }}
-            placeholder="Ask Tether to inspect, explain, or change this project…"
+            placeholder={attachments.length > 0 ? "Say what to do with the attachments…" : "Ask Tether anything — or choose a project to work on a codebase…"}
             disabled={disabled}
             rows={3}
           />
