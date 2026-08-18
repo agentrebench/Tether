@@ -128,7 +128,7 @@ Key behaviors:
 - By default, file reads and file edits are pre-approved. Do not ask for permission in your prose before using file_edit or file_write. Just use the tool when you are ready.
 - On every file_edit, include a confidence value (0.0-1.0) reflecting how sure you are the edit is correct and complete. Be honest and calibrated: use low values (below 0.5) when guessing at an unverified API or editing unfamiliar code, high (above 0.8) when the change is mechanical or you confirmed it against the file. This shades the diff so the user reviews risky changes first — do not inflate it.
 - For non-obvious lines you add — tricky logic, a deliberate trade-off, a workaround, anything a reviewer might question — include a line_rationale entry on the file_edit: map a distinctive substring of that line to one short sentence explaining why it is the way it is. The user can then ask /why <file>:<line> to see your reasoning. Annotate only lines that genuinely warrant it, not trivial ones.
-- Before reading files, write one short sentence naming what you are about to read and why (e.g. "Reading config.py to find the port setting"). One sentence covers a batch of related reads — do not narrate each individual file.
+- Shape of a turn that uses tools: ONE short opening sentence saying what you are about to look at or do (e.g. "Reading config.py to find the port setting") — never a draft answer or an essay before you have looked — then the tool calls, then the answer. Do not narrate each individual file; one sentence covers a batch of related reads.
 - Default to solving the task yourself in the current thread. Do NOT use the agent tool for simple tasks like editing a README, changing one file, answering a direct question, or making a small focused fix.
 - Only consider the agent tool when the user explicitly asks for agents, or when the task is genuinely large enough to benefit from parallel or isolated work. If you want to use an agent without an explicit user request, first ask for approval in a short sentence instead of launching it silently.
 - When the user explicitly asks for N agents, use count=N or provide N task entries.
@@ -170,6 +170,17 @@ Platform: {platform}
 # Appended to the system prompt only when the persistent codebase model is
 # enabled (config.codebase_model_enabled). It teaches the "consult before
 # retrieval" habit that is the whole point of the model.
+# Appended instead of the codebase-model guidance when no project is selected
+# (desktop General chat on the scratch workspace). The user is asking general
+# questions; there is no repository to ground against and no reason to talk
+# about Tether's own machinery.
+_GENERAL_SESSION_GUIDANCE = """
+General session — no project selected:
+- The working directory is a private scratch folder, not a codebase. Do not treat it as a project, do not go looking for a repository or a README in it, and do not mention codebase models, workspaces, or Tether's internals unless the user asks about Tether.
+- Answer general questions directly from your knowledge, like a capable assistant. Use tools only when the request needs them (run a calculation, fetch a page, create a file the user asked for — those files go in the scratch folder).
+- If the user pastes or attaches material, work from that material. If they refer to code that is not present, say so briefly and offer to work on it once they choose a project (Workspace → Choose project).
+"""
+
 _CODEBASE_MODEL_GUIDANCE = """
 Ground every claim about THIS project in the repository. These instructions describe your tools, not the codebase; never describe or assess the project from them. When asked about the project, its design, quality, or "what you think", inspect first (model_query action="architecture", the README, the key modules) and cite what you actually read.
 
@@ -607,8 +618,12 @@ class QueryEngine:
         on_stream_event: callable = None,
         persistent_context_enabled: bool | None = None,
         include_last_session_summary: bool = True,
+        general_session: bool = False,
     ):
         self.config = config
+        # Desktop General chat: no project, no codebase model, no grounding
+        # guard — plain assistant behaviour with a scratch working directory.
+        self.general_session = bool(general_session)
         self.logger = get_logger(__name__)
         self.backend = InferenceBackend(config)
         self.tools = tool_registry
@@ -711,7 +726,9 @@ class QueryEngine:
             memory_section=memory_section,
             last_session_section=last_session_section,
         )
-        if getattr(self.config, "codebase_model_enabled", False):
+        if self.general_session:
+            system_text += _GENERAL_SESSION_GUIDANCE
+        elif getattr(self.config, "codebase_model_enabled", False):
             system_text += _CODEBASE_MODEL_GUIDANCE
         return Message(role="system", content=system_text)
 
@@ -1142,7 +1159,8 @@ class QueryEngine:
             if not assistant_msg.tool_calls:
                 final_text = assistant_msg.content or ""
                 if (
-                    not getattr(self, "_grounding_nudged", False)
+                    not getattr(self, "general_session", False)
+                    and not getattr(self, "_grounding_nudged", False)
                     and self._needs_grounding(user_input, final_text, task_intent, all_tool_calls)
                 ):
                     self._grounding_nudged = True

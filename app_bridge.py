@@ -465,8 +465,11 @@ class AppBridgeServer:
         self.engine = self._build_engine()
 
     def _build_engine(self) -> QueryEngine:
+        general = is_scratch_workspace(self.project)
         registry = ToolRegistry.build_default(
-            include_codebase_model=getattr(self.config, "codebase_model_enabled", False),
+            include_codebase_model=(
+                getattr(self.config, "codebase_model_enabled", False) and not general
+            ),
             workspace_root=self.project,
             enforce_workspace=True,
         )
@@ -503,6 +506,7 @@ class AppBridgeServer:
             # workspace-scoped. Desktop memory deliberately excludes it so a
             # summary from one project cannot seed paths into another.
             include_last_session_summary=False,
+            general_session=general,
         )
         self._bootstrap_codebase_model(engine)
         return engine
