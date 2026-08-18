@@ -347,3 +347,37 @@ class LiveCodeDecoding(unittest.TestCase):
         self.assertEqual(_partial_json_string(buf + "\\u00", ("content",)), 'def f():\n    return "x"')
         self.assertEqual(_partial_json_string(buf + '\\u00e9"}', ("content",)), 'def f():\n    return "x"é')
         self.assertIsNone(_partial_json_string('{"file_path": "a', ("content",)))
+
+
+class Attachments(unittest.TestCase):
+    """Composer attachments are folded into the prompt by the bridge."""
+
+    def test_resolve_attachments_pastes_files_images_and_failures(self):
+        import tempfile
+        from pathlib import Path
+        from tether.app_bridge import resolve_attachments
+        d = Path(tempfile.mkdtemp())
+        (d / "a.py").write_text("print(1)\nprint(2)\n")
+        (d / "img.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 32)
+        prompt, images, notes = resolve_attachments("look", [
+            {"kind": "paste", "name": "Pasted text", "text": "l1\nl2\nl3"},
+            {"kind": "file", "name": "a.py", "path": str(d / "a.py")},
+            {"kind": "file", "name": "img.png", "path": str(d / "img.png")},
+            {"kind": "file", "name": "missing.txt", "path": str(d / "nope.txt")},
+        ])
+        self.assertIn("[Pasted text 1 — 3 lines]", prompt)
+        self.assertIn("```py\nprint(1)", prompt)
+        self.assertIn("[Attached image 3: img.png]", prompt)
+        self.assertEqual(len(images), 1)
+        self.assertTrue(images[0].startswith("data:image/png;base64,"))
+        self.assertEqual([n["ok"] for n in notes], [True, True, True, False])
+        self.assertIn("could not be attached", prompt)
+
+    def test_user_message_with_images_serialises_as_content_parts(self):
+        m = Message(role="user", content="what is this?", images=["data:image/png;base64,AAAA"])
+        d = m.to_api_dict()
+        self.assertEqual(d["content"][0], {"type": "text", "text": "what is this?"})
+        self.assertEqual(d["content"][1]["type"], "image_url")
+        self.assertEqual(Message.from_dict(m.to_dict()).images, m.images)
+        # No images → plain string content, unchanged for every provider.
+        self.assertEqual(Message(role="user", content="hi").to_api_dict()["content"], "hi")

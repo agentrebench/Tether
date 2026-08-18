@@ -15,6 +15,7 @@ import argparse
 from collections import deque
 import contextlib
 import hashlib
+import base64
 import io
 import json
 import os
@@ -23,6 +24,7 @@ import sys
 import threading
 import uuid
 import copy
+import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -289,6 +291,122 @@ class _PendingApproval:
 class _QueuedTurn:
     turn_id: str
     prompt: str
+    images: list[str] = field(default_factory=list)
+
+
+# --------------------------------------------------------------------------
+# Attachments: pastes, files, PDFs and images the user adds in the composer.
+# Resolved here (not in the app) so the model gets plain text in its prompt
+# and vision-capable providers get image parts, with bounded sizes.
+# --------------------------------------------------------------------------
+_TEXT_EXTENSIONS = {
+    ".txt", ".md", ".markdown", ".rst", ".csv", ".tsv", ".json", ".jsonl", ".yaml", ".yml",
+    ".toml", ".ini", ".cfg", ".conf", ".env", ".xml", ".html", ".htm", ".css", ".scss",
+    ".log", ".sql", ".sh", ".bash", ".zsh", ".fish", ".ps1", ".bat", ".dockerfile",
+    ".py", ".pyi", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".go", ".rs", ".java",
+    ".kt", ".kts", ".swift", ".c", ".h", ".cpp", ".cc", ".hpp", ".cs", ".rb", ".php",
+    ".pl", ".lua", ".r", ".m", ".mm", ".scala", ".clj", ".ex", ".exs", ".erl", ".hs",
+    ".dart", ".vue", ".svelte", ".tf", ".hcl", ".proto", ".graphql", ".gql", ".tex",
+}
+_IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                ".gif": "image/gif", ".webp": "image/webp"}
+_MAX_TEXT_CHARS = 200_000       # per attachment
+_MAX_TOTAL_CHARS = 600_000      # all attachments in one turn
+_MAX_IMAGE_BYTES = 8_000_000    # per image (before base64)
+
+
+def _extract_pdf_text(path: Path) -> tuple[str, str]:
+    """(text, note). Tries pypdf, then poppler's pdftotext; explains if neither."""
+    try:
+        from pypdf import PdfReader  # optional dependency
+
+        reader = PdfReader(str(path))
+        pages = []
+        for index, page in enumerate(reader.pages):
+            pages.append(f"--- page {index + 1} ---\n{page.extract_text() or ''}")
+        return "\n".join(pages), ""
+    except ImportError:
+        pass
+    except Exception as exc:  # corrupt / encrypted
+        return "", f"could not read PDF with pypdf: {exc}"
+    pdftotext = shutil.which("pdftotext")
+    if pdftotext:
+        try:
+            out = subprocess.run([pdftotext, "-layout", str(path), "-"],
+                                 capture_output=True, text=True, timeout=60)
+            if out.returncode == 0:
+                return out.stdout, ""
+            return "", f"pdftotext failed: {out.stderr.strip()[:200]}"
+        except (OSError, subprocess.SubprocessError) as exc:
+            return "", f"pdftotext failed: {exc}"
+    return "", ("no PDF text extractor available — install one with "
+                "`pipx inject tether pypdf` (or Homebrew `poppler` for pdftotext)")
+
+
+def resolve_attachments(prompt: str, attachments: list[dict]) -> tuple[str, list[str], list[dict]]:
+    """Fold attachments into the prompt. Returns (prompt, images, notes)
+    where notes are per-attachment outcomes for the app to display."""
+    blocks: list[str] = []
+    images: list[str] = []
+    notes: list[dict] = []
+    total = 0
+    for index, item in enumerate(attachments or [], start=1):
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("kind") or "file")
+        name = str(item.get("name") or f"attachment {index}")
+        note = {"name": name, "kind": kind, "ok": True, "detail": ""}
+        try:
+            if kind == "paste":
+                text = str(item.get("text") or "")
+                lines = text.count("\n") + (1 if text and not text.endswith("\n") else 0)
+                text = text[:_MAX_TEXT_CHARS]
+                blocks.append(f"[Pasted text {index} — {lines} lines]\n```\n{text}\n```")
+                note["detail"] = f"{lines} lines"
+            else:
+                path = Path(str(item.get("path") or "")).expanduser()
+                if not path.is_file():
+                    raise FileNotFoundError(f"not a file: {path}")
+                ext = path.suffix.lower()
+                size = path.stat().st_size
+                if ext in _IMAGE_TYPES:
+                    if size > _MAX_IMAGE_BYTES:
+                        raise ValueError(f"image is {size // 1_000_000} MB; limit is {_MAX_IMAGE_BYTES // 1_000_000} MB")
+                    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+                    images.append(f"data:{_IMAGE_TYPES[ext]};base64,{encoded}")
+                    blocks.append(f"[Attached image {index}: {name}]")
+                    note["detail"] = f"image · {size // 1024} KB"
+                elif ext == ".pdf":
+                    text, problem = _extract_pdf_text(path)
+                    if problem and not text:
+                        raise ValueError(problem)
+                    text = text[:_MAX_TEXT_CHARS]
+                    blocks.append(f"[Attached PDF {index}: {name}]\n```\n{text}\n```")
+                    note["detail"] = f"pdf · {len(text):,} chars extracted"
+                else:
+                    if ext not in _TEXT_EXTENSIONS and ext:
+                        # Unknown extension: attach if it decodes as UTF-8 text.
+                        raw = path.read_bytes()[:_MAX_TEXT_CHARS]
+                        try:
+                            text = raw.decode("utf-8")
+                        except UnicodeDecodeError as exc:
+                            raise ValueError(f"unsupported binary file type {ext or '(none)'}") from exc
+                    else:
+                        text = path.read_text(encoding="utf-8", errors="replace")[:_MAX_TEXT_CHARS]
+                    lang = ext.lstrip(".") if ext else ""
+                    blocks.append(f"[Attached file {index}: {name} ({path})]\n```{lang}\n{text}\n```")
+                    note["detail"] = f"{text.count(chr(10)) + 1} lines"
+            total += len(blocks[-1]) if blocks else 0
+            if total > _MAX_TOTAL_CHARS:
+                blocks[-1] = blocks[-1][: max(0, _MAX_TOTAL_CHARS - (total - len(blocks[-1])))] + "\n… (attachments truncated)"
+        except Exception as exc:
+            note["ok"] = False
+            note["detail"] = str(exc)
+            blocks.append(f"[Attachment {index}: {name} — could not be attached: {exc}]")
+        notes.append(note)
+    if blocks:
+        prompt = (prompt.rstrip() + "\n\n" + "\n\n".join(blocks)).strip()
+    return prompt, images, notes
 
 
 @dataclass
@@ -687,7 +805,12 @@ class AppBridgeServer:
     def _start_submit(self, message: dict[str, Any]) -> None:
         prompt = str(message.get("prompt", "")).strip()
         turn_id = str(message.get("id", "")) or uuid.uuid4().hex
-        if not prompt:
+        attachments = message.get("attachments") or []
+        images: list[str] = []
+        if attachments:
+            prompt, images, notes = resolve_attachments(prompt, list(attachments))
+            self.writer.send({"type": "attachments_resolved", "id": turn_id, "attachments": notes})
+        if not prompt and not images:
             self.writer.send({"type": "error", "message": "The prompt is empty.", "id": turn_id})
             return
         with self._state_lock:
@@ -699,7 +822,7 @@ class AppBridgeServer:
                         "id": turn_id,
                     })
                     return
-                self._queued_turns.append(_QueuedTurn(turn_id=turn_id, prompt=prompt))
+                self._queued_turns.append(_QueuedTurn(turn_id=turn_id, prompt=prompt, images=images))
                 position = len(self._queued_turns)
                 self.writer.send({
                     "type": "turn_queued",
@@ -716,15 +839,17 @@ class AppBridgeServer:
 
         worker = threading.Thread(
             target=self._submit_worker,
-            args=(turn_id, prompt, cancel_event),
+            args=(turn_id, prompt, cancel_event, images),
             daemon=True,
             name="tether-app-turn",
         )
         worker.start()
 
     def _submit_worker(
-        self, turn_id: str, prompt: str, cancel_event: threading.Event
+        self, turn_id: str, prompt: str, cancel_event: threading.Event,
+        images: list[str] | None = None,
     ) -> None:
+        images = list(images or [])
         mark_interactive(True)
         try:
             while True:
@@ -735,7 +860,10 @@ class AppBridgeServer:
                 stop_reason = "failed"
                 try:
                     with contextlib.redirect_stdout(captured):
-                        result = self.engine.submit(prompt, cancel_event=cancel_event)
+                        result = (
+                            self.engine.submit(prompt, cancel_event=cancel_event, images=images)
+                            if images else self.engine.submit(prompt, cancel_event=cancel_event)
+                        )
                     stop_reason = result.stop_reason
                     self.writer.send({
                         "type": "turn_completed",
@@ -769,6 +897,7 @@ class AppBridgeServer:
                         queued_turn = self._queued_turns.popleft()
                         turn_id = queued_turn.turn_id
                         prompt = queued_turn.prompt
+                        images = list(queued_turn.images)
                         cancel_event = threading.Event()
                         self._cancel_event = cancel_event
                         self._active_turn_id = turn_id

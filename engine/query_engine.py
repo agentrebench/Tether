@@ -510,6 +510,9 @@ def _describe_api_error(code: int, body: str, config) -> str:
     lowered = (body or "").lower()
     model = getattr(config, "api_model", "") or "the selected model"
     provider = getattr(config, "provider", "") or "the provider"
+    if code == 400 and any(k in lowered for k in ("image", "vision", "multimodal", "content type", "image_url")):
+        return (f"Error: `{model}` on {provider} rejected the attached image(s) (400) — this model "
+                f"does not accept images. Remove the image or switch to a vision-capable model.")
     if code in (401,):
         return (f"Error: {provider} rejected the API key (401). Check the key in the "
                 f"runtime sheet or `tether key`.")
@@ -843,7 +846,7 @@ class QueryEngine:
                 self._detector = False
         return self._detector or None
 
-    def submit(self, user_input: str, cancel_event=None) -> TurnResult:
+    def submit(self, user_input: str, cancel_event=None, images: list[str] | None = None) -> TurnResult:
         """Submit user input and run the agentic loop with streaming output.
 
         When `cancel_event` (a threading.Event) is supplied, the turn is
@@ -871,7 +874,7 @@ class QueryEngine:
         # the completed return.
         self._suggest_skill = None
 
-        self.messages.append(Message(role="user", content=user_input))
+        self.messages.append(Message(role="user", content=user_input, images=list(images or [])))
         task_intent = self._classify_task_intent(user_input)
         all_tool_calls = []
         final_text = ""

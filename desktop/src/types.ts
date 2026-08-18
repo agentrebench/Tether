@@ -9,6 +9,24 @@ export type TurnSegment =
   | { kind: "text"; text: string }
   | { kind: "tools"; activities: ToolActivity[] };
 
+/** Something the user added to the composer besides typed text. Pastes carry
+ * their text; files carry a path the bridge reads (text, code, markdown, PDF
+ * text, or an image for vision-capable models). */
+export interface ComposerAttachment {
+  id: string;
+  kind: "paste" | "file";
+  name: string;
+  /** paste: the pasted text (not shown; sent to the bridge) */
+  text?: string;
+  /** file: absolute path chosen in the file dialog */
+  path?: string;
+  lines?: number;
+  sizeBytes?: number;
+  /** filled from the bridge's attachments_resolved reply */
+  ok?: boolean;
+  detail?: string;
+}
+
 export interface ChatMessage {
   id: string;
   turnId?: string;
@@ -21,6 +39,8 @@ export interface ChatMessage {
   toolActivities?: ToolActivity[];
   agents?: AgentSnapshot[];
   queueState?: "submitting" | "queued" | "active" | "cleared";
+  /** Chips shown on a user message instead of the raw pasted/attached content. */
+  attachments?: ComposerAttachment[];
   queuePosition?: number;
   queueReason?: string;
   tokenCount?: number;

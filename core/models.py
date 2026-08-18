@@ -88,6 +88,10 @@ class Message:
     # otherwise it 400s with "the reasoning_content in the thinking mode must
     # be passed back to the api."
     reasoning_content: str | None = None
+    # Attached images (data: URLs) on a user message. Serialised as OpenAI-style
+    # content parts; providers without vision reject them with a 400 that the
+    # engine turns into a readable error.
+    images: list[str] = field(default_factory=list)
 
     def to_api_dict(self) -> dict:
         d: dict = {"role": self.role}
@@ -104,7 +108,13 @@ class Message:
                 }
                 for tc in self.tool_calls
             ]
-        if self.content is not None:
+        if self.images and self.role == "user":
+            parts: list[dict] = []
+            if self.content:
+                parts.append({"type": "text", "text": self.content})
+            parts.extend({"type": "image_url", "image_url": {"url": url}} for url in self.images)
+            d["content"] = parts
+        elif self.content is not None:
             d["content"] = self.content
         elif self.role == "assistant":
             # llama-server requires the content key on assistant messages.
@@ -140,6 +150,7 @@ class Message:
             "tool_call_id": self.tool_call_id,
             "name": self.name,
             "reasoning_content": self.reasoning_content,
+            "images": list(self.images),
         }
 
     @classmethod
@@ -158,6 +169,7 @@ class Message:
             tool_call_id=data.get("tool_call_id"),
             name=data.get("name"),
             reasoning_content=data.get("reasoning_content"),
+            images=list(data.get("images") or []),
         )
 
 

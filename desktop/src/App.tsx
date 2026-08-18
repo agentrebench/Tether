@@ -26,6 +26,10 @@ import {
   ListChecks,
   MessageSquarePlus,
   Moon,
+  Paperclip,
+  FileText,
+  Image as ImageIcon,
+  ClipboardList,
   Plus,
   RotateCcw,
   Save,
@@ -75,6 +79,7 @@ import type {
   BridgeEnvelope,
   BridgePayload,
   ChatMessage,
+  ComposerAttachment,
   ConnectionState,
   ProviderModel,
   ProviderOption,
@@ -647,6 +652,7 @@ export default function App() {
   const [activity, setActivity] = useState("");
   const [activityElapsed, setActivityElapsed] = useState(0);
   const [environment, setEnvironment] = useState<EnvironmentReport | null>(null);
+  const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const [setupOpen, setSetupOpen] = useState(false);
   const [setupInitialStep, setSetupInitialStep] = useState<SetupStep | null>(null);
   const [approval, setApproval] = useState<ApprovalRequest | null>(null);
@@ -1131,6 +1137,25 @@ export default function App() {
         break;
       }
 
+      case "attachments_resolved": {
+        const turnId = asString(payload.id);
+        const notes = Array.isArray(payload.attachments) ? payload.attachments.map((n) => asRecord(n)) : [];
+        setMessages((current) => current.map((message) => (
+          message.role === "user" && message.turnId === turnId && message.attachments
+            ? {
+                ...message,
+                attachments: message.attachments.map((a, index) => {
+                  const note = notes[index];
+                  return note ? { ...a, ok: note.ok !== false, detail: asString(note.detail) } : a;
+                }),
+              }
+            : message
+        )));
+        const failed = notes.filter((n) => n.ok === false);
+        if (failed.length > 0) setError(`Could not attach ${failed.map((n) => asString(n.name)).join(", ")}: ${asString(failed[0].detail)}`);
+        break;
+      }
+
       case "providers_updated":
         // Live model discovery finished (background); refresh the catalog
         // only — never disturb the open settings sheet or the active model.
@@ -1451,6 +1476,35 @@ export default function App() {
     }
   };
 
+  const attachFiles = async () => {
+    const selection = await open({
+      multiple: true,
+      directory: false,
+      title: "Attach files",
+      filters: [
+        { name: "Documents & code", extensions: ["pdf", "txt", "md", "markdown", "rst", "csv", "json", "yaml", "yml", "toml", "xml", "html", "css", "log", "py", "js", "jsx", "ts", "tsx", "go", "rs", "java", "kt", "swift", "c", "h", "cpp", "hpp", "cs", "rb", "php", "sh", "sql", "lua", "r", "dart", "vue", "svelte", "tf", "proto"] },
+        { name: "Images", extensions: ["png", "jpg", "jpeg", "gif", "webp"] },
+        { name: "All files", extensions: ["*"] },
+      ],
+    });
+    const paths = Array.isArray(selection) ? selection : typeof selection === "string" ? [selection] : [];
+    if (paths.length === 0) return;
+    setAttachments((current) => [
+      ...current,
+      ...paths
+        .filter((path) => !current.some((a) => a.path === path))
+        .map((path) => ({ id: uid(), kind: "file" as const, name: basename(path), path })),
+    ]);
+  };
+
+  const addPasteAttachment = (text: string) => {
+    const lines = text.split(/\r?\n/).length;
+    setAttachments((current) => [
+      ...current,
+      { id: uid(), kind: "paste", name: `Pasted text (${lines} lines)`, text, lines },
+    ]);
+  };
+
   const configureSession = async (setting: SessionSetting, enabled: boolean) => {
     if (connection !== "ready" || working || sessionSettingSaving !== null) return;
     setSessionSettingSaving(setting);
@@ -1465,8 +1519,12 @@ export default function App() {
     }
   };
 
-  const submitConversationPrompt = useCallback(async (prompt: string, displayText = prompt) => {
-    if (!prompt || connection !== "ready") return;
+  const submitConversationPrompt = useCallback(async (
+    prompt: string,
+    displayText = prompt,
+    attached: ComposerAttachment[] = [],
+  ) => {
+    if ((!prompt && attached.length === 0) || connection !== "ready") return;
     const turnId = uid();
     const wasWorking = working;
     autoFollowRef.current = true;
@@ -1476,16 +1534,27 @@ export default function App() {
       turnId,
       role: "user",
       text: displayText,
+      attachments: attached.length > 0 ? attached.map((a) => ({ ...a, text: undefined })) : undefined,
       queueState: "submitting",
     }]);
     setDraft("");
+    setAttachments([]);
     setDirectionPrompt(null);
     setWorking(true);
     setActivity(wasWorking ? "Queuing your follow-up…" : "Queuing your request…");
     setError(null);
     try {
       await invoke("send_bridge", {
-        message: { type: "submit", id: turnId, prompt },
+        message: {
+          type: "submit",
+          id: turnId,
+          prompt,
+          attachments: attached.map((a) => (
+            a.kind === "paste"
+              ? { kind: "paste", name: a.name, text: a.text ?? "" }
+              : { kind: "file", name: a.name, path: a.path ?? "" }
+          )),
+        },
       });
     } catch (caught) {
       const message = String(caught);
@@ -1511,7 +1580,7 @@ export default function App() {
 
   const sendMessage = async () => {
     const prompt = draft.trim();
-    if (!prompt || connection !== "ready") return;
+    if ((!prompt && attachments.length === 0) || connection !== "ready") return;
     if (prompt.startsWith("/")) {
       const alsoMatch = prompt.match(/^\/also(?:\s+([\s\S]+))?$/i);
       if (alsoMatch) {
@@ -1565,7 +1634,7 @@ export default function App() {
       }
       return;
     }
-    await submitConversationPrompt(prompt);
+    await submitConversationPrompt(prompt || "(see attachments)", prompt, attachments);
   };
 
   const cancelTurn = async () => {
@@ -1900,6 +1969,10 @@ export default function App() {
               directionPrompt={directionPrompt?.message ?? ""}
               focusRequest={composerFocusRequest}
               send={() => void sendMessage()}
+              attachments={attachments}
+              onAttachFiles={() => void attachFiles()}
+              onPasteText={addPasteAttachment}
+              onRemoveAttachment={(id) => setAttachments((current) => current.filter((a) => a.id !== id))}
             />
           </>
         )}
@@ -3069,6 +3142,9 @@ const MessageView = memo(function MessageView({
         ) : (
           <p>{message.text}</p>
         )}
+        {message.role === "user" && message.attachments && message.attachments.length > 0 && (
+          <AttachmentChips attachments={message.attachments} />
+        )}
         {message.role === "user" && queueLabel && (
           <div className={`queue-state ${message.queueState}`} title={message.queueReason || undefined}>
             <span />
@@ -3413,6 +3489,48 @@ function AgentActivityView({
   );
 }
 
+/** A paste this long is content, not a message: it becomes a chip. */
+const PASTE_CHIP_MIN_LINES = 6;
+const PASTE_CHIP_MIN_CHARS = 600;
+
+function attachmentIcon(attachment: ComposerAttachment) {
+  if (attachment.kind === "paste") return <ClipboardList size={12} />;
+  const ext = (attachment.name.split(".").pop() || "").toLowerCase();
+  if (["png", "jpg", "jpeg", "gif", "webp"].includes(ext)) return <ImageIcon size={12} />;
+  if (ext === "pdf" || ext === "md" || ext === "txt") return <FileText size={12} />;
+  return <FileCode2 size={12} />;
+}
+
+function AttachmentChips({
+  attachments,
+  onRemove,
+}: {
+  attachments: ComposerAttachment[];
+  onRemove?: (id: string) => void;
+}) {
+  if (attachments.length === 0) return null;
+  return (
+    <div className="attachment-chips" aria-label="Attachments">
+      {attachments.map((attachment) => (
+        <span
+          key={attachment.id}
+          className={`attachment-chip ${attachment.ok === false ? "failed" : ""}`}
+          title={attachment.detail || attachment.path || attachment.name}
+        >
+          {attachmentIcon(attachment)}
+          <span>{attachment.name}</span>
+          {attachment.detail && attachment.kind !== "paste" && <small>{attachment.detail}</small>}
+          {onRemove && (
+            <button type="button" onClick={() => onRemove(attachment.id)} aria-label={`Remove ${attachment.name}`}>
+              <X size={11} />
+            </button>
+          )}
+        </span>
+      ))}
+    </div>
+  );
+}
+
 function Composer({
   value,
   setValue,
@@ -3421,6 +3539,10 @@ function Composer({
   directionPrompt,
   focusRequest,
   send,
+  attachments,
+  onAttachFiles,
+  onPasteText,
+  onRemoveAttachment,
 }: {
   value: string;
   setValue: (value: string) => void;
@@ -3429,6 +3551,10 @@ function Composer({
   directionPrompt: string;
   focusRequest: number;
   send: () => void;
+  attachments: ComposerAttachment[];
+  onAttachFiles: () => void;
+  onPasteText: (text: string) => void;
+  onRemoveAttachment: (id: string) => void;
 }) {
   const [slashMenuOpen, setSlashMenuOpen] = useState(false);
   const [cursorPosition, setCursorPosition] = useState(value.length);
@@ -3536,18 +3662,31 @@ function Composer({
           ))}
         </div>
       )}
-      <div className={`composer ${showSlashMenu ? "slash-open" : ""}`}>
-        <button
-          type="button"
-          className="slash-button"
-          onClick={toggleCommandMenu}
-          disabled={disabled}
-          aria-label="Show Tether commands"
-          title="Show commands"
-        >
-          <TerminalSquare size={15} />
-        </button>
+      <div className={`composer ${showSlashMenu ? "slash-open" : ""} ${attachments.length > 0 ? "has-attachments" : ""}`}>
+        <div className="composer-side">
+          <button
+            type="button"
+            className="slash-button"
+            onClick={toggleCommandMenu}
+            disabled={disabled}
+            aria-label="Show Tether commands"
+            title="Show commands"
+          >
+            <TerminalSquare size={15} />
+          </button>
+          <button
+            type="button"
+            className="slash-button attach-button"
+            onClick={onAttachFiles}
+            disabled={disabled}
+            aria-label="Attach files"
+            title="Attach files: code, text, markdown, PDF, images"
+          >
+            <Paperclip size={15} />
+          </button>
+        </div>
         <div className="command-input-wrap">
+          <AttachmentChips attachments={attachments} onRemove={onRemoveAttachment} />
           {commandActive && (
             <div ref={commandHighlightRef} className="command-highlight" aria-hidden="true">
               {commandRanges.flatMap((range, index) => {
@@ -3573,6 +3712,14 @@ function Composer({
               setCursorPosition(nextCursor);
               setSlashMenuOpen(slashCommandContextAt(next, nextCursor, commands) !== null);
             }}
+            onPaste={(event) => {
+              const text = event.clipboardData.getData("text/plain");
+              const lines = text.split(/\r?\n/).length;
+              if (lines >= PASTE_CHIP_MIN_LINES || text.length >= PASTE_CHIP_MIN_CHARS) {
+                event.preventDefault();
+                onPasteText(text);
+              }
+            }}
             onSelect={(event) => setCursorPosition(event.currentTarget.selectionStart)}
             onScroll={(event) => {
               if (!commandHighlightRef.current) return;
@@ -3595,7 +3742,7 @@ function Composer({
             rows={3}
           />
         </div>
-        <button onClick={send} disabled={disabled || !value.trim()} aria-label="Send message">
+        <button onClick={send} disabled={disabled || (!value.trim() && attachments.length === 0)} aria-label="Send message">
           <ArrowUp size={18} />
         </button>
       </div>
