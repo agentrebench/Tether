@@ -653,6 +653,7 @@ export default function App() {
   const [activityElapsed, setActivityElapsed] = useState(0);
   const [environment, setEnvironment] = useState<EnvironmentReport | null>(null);
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
+  const [recentProject, setRecentProject] = useState<string | null>(() => localStorage.getItem(PROJECT_STORAGE_KEY));
   const [setupOpen, setSetupOpen] = useState(false);
   const [setupInitialStep, setSetupInitialStep] = useState<SetupStep | null>(null);
   const [approval, setApproval] = useState<ApprovalRequest | null>(null);
@@ -1325,8 +1326,10 @@ export default function App() {
     setPreviewError("");
     autoFollowRef.current = true;
     setFollowingOutput(true);
-    if (path) localStorage.setItem(PROJECT_STORAGE_KEY, path);
-    else localStorage.removeItem(PROJECT_STORAGE_KEY);
+    if (path) {
+      localStorage.setItem(PROJECT_STORAGE_KEY, path);
+      setRecentProject(path);
+    }
     try {
       await invoke<string>("start_bridge", { project: path, bridgeId });
     } catch (caught) {
@@ -1389,9 +1392,9 @@ export default function App() {
         setSetupOpen(true);
         return; // connecting would just fail; the setup dialog continues for us
       }
-      // No saved project → general session on the scratch workspace.
-      const savedProject = localStorage.getItem(PROJECT_STORAGE_KEY);
-      await connectProject(savedProject ?? "");
+      // Always start blank: a general session on the scratch workspace. The
+      // last project is only offered as a shortcut in the sidebar.
+      await connectProject("");
     })();
 
     return () => {
@@ -1822,14 +1825,47 @@ export default function App() {
         </button>
 
         <SidebarSection title="Workspace">
-          <button className="workspace-card" onClick={() => void chooseProject()}>
-            <Folder size={17} />
+          <button
+            className={`workspace-card ${projectPath ? "" : "active"}`}
+            onClick={() => { if (projectPath) void connectProject(""); }}
+            title="Chat without a project; files go to ~/.tether/scratch"
+          >
+            <MessageSquarePlus size={17} />
             <span>
-              <strong>{projectName}</strong>
-              <small>{projectPath ? "Change project" : "Choose project"}</small>
+              <strong>General chat</strong>
+              <small>{projectPath ? "Switch to no project" : "Active · no project"}</small>
             </span>
-            <ChevronRight size={15} />
+            {!projectPath && <Check size={15} />}
           </button>
+          {projectPath ? (
+            <button className="workspace-card active" onClick={() => void chooseProject()} title={projectPath}>
+              <Folder size={17} />
+              <span>
+                <strong>{projectName}</strong>
+                <small>Active · change project</small>
+              </span>
+              <ChevronRight size={15} />
+            </button>
+          ) : recentProject ? (
+            <button className="workspace-card" onClick={() => void connectProject(recentProject)} title={recentProject}>
+              <Folder size={17} />
+              <span>
+                <strong>{basename(recentProject)}</strong>
+                <small>Recent · open</small>
+              </span>
+              <ChevronRight size={15} />
+            </button>
+          ) : null}
+          {!projectPath && (
+            <button className="workspace-card" onClick={() => void chooseProject()}>
+              <FolderOpen size={17} />
+              <span>
+                <strong>Choose project…</strong>
+                <small>Work on a codebase</small>
+              </span>
+              <ChevronRight size={15} />
+            </button>
+          )}
         </SidebarSection>
 
         <SidebarSection title="Runtime">
@@ -2045,8 +2081,7 @@ export default function App() {
           onReady={() => {
             setSetupOpen(false);
             setError(null);
-            const savedProject = localStorage.getItem(PROJECT_STORAGE_KEY);
-            void connectProject(savedProject ?? "");
+            void connectProject("");
           }}
         />
       )}

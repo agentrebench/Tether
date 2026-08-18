@@ -147,6 +147,8 @@ button { color: inherit; }
   cursor: pointer;
 }
 .workspace-card:hover { background: rgba(255, 255, 255, 0.045); border-color: var(--line-strong); }
+.workspace-card + .workspace-card { margin-top: 6px; }
+.workspace-card.active { border-color: rgba(155,124,246,.38); background: rgba(155,124,246,.07); }
 .workspace-card > svg:first-child { color: var(--purple); }
 .workspace-card > svg:last-child { color: var(--muted-2); }
 .workspace-card span { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
