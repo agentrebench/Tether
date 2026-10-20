@@ -113,6 +113,153 @@ Provider menus and a desktop shell make Tether accessible. The compounding,
 model-independent project knowledge is the part that is hard to copy.
 
 
+macOS terminal application
+--------------------------
+
+Tether now has a standalone macOS terminal app under `native/`. It opens a
+normal login shell, with tabs, split panes, clickable zsh-theme settings,
+live theme previews, a bundled Nerd Font, and btop included. Agents are optional;
+an interactive light appears while they think. **⌘,** opens Settings.
+
+The agent engine and project knowledge remain in Python. C23 owns terminal
+processes and the light game, with a small Cocoa/WebKit display adapter.
+Build with `python scripts/build_macos_app.py --fetch`, then open
+`dist/macos/Tether.app`. The current package targets Apple Silicon macOS 26+.
+See [native app usage, architecture, and verification](docs/native-macos-app.md).
+
+Terminal workspace
+------------------
+
+Run `tether` in a project directory to open a **normal terminal** immediately.
+No provider selection, sign-in, or model server is needed. Your login shell handles
+commands, history, completion, Ctrl+C, Ctrl+D, Ctrl+W, and full-screen programs.
+A single tab bar gives you **+** for another terminal, **Split** for a shell beside
+the current one, **Agent** for an optional Tether chat, and **Settings** for themes.
+Click tabs to switch and **×** to close a tab. Exiting the last shell exits Tether.
+Small windows show one tab/pane at a time and keep the other processes running.
+New terminals start in the directory where you launched Tether.
+
+**F2** opens Settings, **F4** opens a terminal, **F6** switches panes, **F7** switches
+tabs, **F8** splits right, and **F9** opens an Agent tab. Normal shell key bindings
+are passed through. Scroll the mouse wheel or press **Shift+PageUp** to browse
+terminal history; **Esc** returns to the live prompt. `tether terminal` explicitly
+opens this workspace.
+
+The **Agent** tab shows the provider picker only when requested, then starts a
+compact Tether chat. You can return to your shell at any time by clicking its tab.
+For the full conversation workspace described below, run **`tether chat`**
+(`tether start` and `tether run` also remain available). Choose Claude, Codex, GPT,
+DeepSeek, Kimi, GLM, or a local model with Up/Down and Enter, or click an entry.
+The picker shows credential readiness and includes configured custom providers.
+Explicit model/resume options, `--plain`, pipes, and `TERM=dumb` retain their
+existing direct chat behavior.
+
+### Full conversation workspace
+
+A persistent left sidebar shows the host and its sub-agents with distinct provider marks
+(Claude, GPT, Codex, DeepSeek, Kimi, GLM, and local models), model names, and live
+status. Click an agent or use **Alt+Up/Down** to inspect its task, tool activity,
+and result; **Esc** returns to the conversation. These are Tether's own agents,
+not independently launched CLI processes. Sub-agents currently inherit the
+host's provider and model.
+
+The conversation streams alongside the sidebar while the composer stays
+available. **Enter** sends, **Alt+Enter** adds a line, **PageUp/PageDown** scroll,
+**Ctrl+End** follows new output, **Ctrl+C** interrupts work, and **Ctrl+D** exits
+when the composer is empty. Type during a turn to queue a follow-up; approval
+and clarification answers use the same composer. **Ctrl+B** toggles the sidebar,
+which also hides automatically in terminals narrower than 72 columns.
+
+Use `/effort` to choose the active model's reasoning level with **Up/Down** and
+**Enter**, or set it directly with `/effort high`. The picker shows only supported
+levels (or enabled/disabled for models with a thinking toggle), marks the current
+setting, and saves your choice for the next request and future launches. The
+conversation header and `/model stats` show the selected effort. `/effort list`
+prints numbered choices; `/effort stats` shows the current setting. Selecting a
+different model loads that model's default reasoning setting.
+
+Use the toolbar's **← → ↑ ↓** buttons to split the active pane in that direction.
+Each split is a regular login shell: run `claude`, `codex`, or any other installed
+command. **Ctrl+W**, then an **arrow key**, creates a split; **F6** switches panes
+and **Ctrl+W**, then **X**, closes the selected shell or file pane. Click a pane
+to focus it. Ctrl+C and ordinary terminal keys go to the selected shell. Closing
+a shell pane or exiting Tether terminates that shell and its foreground job.
+On small windows, Tether shows the active pane; F6 still switches between them.
+
+Click **⚙ Settings** (or **F2**) for a menu of **Shell & appearance**, **Project
+folder**, **Model**, and **Reasoning effort**. Model and reasoning choices use the
+same pickers as `/model` and `/effort`; finish or stop active work before changing
+them. Local models stay loaded for the session, and models without reasoning
+controls show an explanation.
+
+Choose **Project folder** to browse and open a folder. Its expandable
+file tree appears in the sidebar: click a folder to expand it or a file to preview
+it. **F3** toggles the tree; use **Up/Down**, **Left/Right**, and **Enter** to browse,
+and **F5** to refresh. Settings also offers a hidden-files toggle. Opening a folder
+changes Tether's working directory and the starting directory for new shells;
+existing shells keep their own directories. Finish or stop the current Tether task
+before changing folders. File previews are read only.
+
+Use `tether --plain` (or `tether start --plain`) for the original scrolling
+REPL. Pipes and `TERM=dumb` select that mode automatically. Provider marks use
+standard Unicode characters and text labels, so no Nerd Font is required.
+
+### Zsh themes and Powerline fonts
+
+Click **Settings** in the terminal tab bar. Search and scroll through installed
+**Oh My Zsh themes by name**, alongside the built-in Minimal and Powerline prompts.
+The catalog discovers `$ZSH`, `~/.oh-my-zsh`, custom themes, and common system
+installations. No framework or theme download is required when already installed.
+Choose a theme and click **Preview** to try it in a real shell without changing
+your saved preference. Click **Use theme** to keep that preview, or **Browse themes**
+to try another. **Save** persists the selection and opens a terminal using it;
+existing shells and running jobs are preserved. Cancel/Escape discards dialog edits.
+
+The default **Existing shell theme** keeps your shell's own configuration.
+**Custom file** loads a local zsh theme after normal startup. Common shells and
+built-in prompt glyph modes are selectable. Font modes affect the built-in
+Powerline prompt; installed themes use their own glyphs. Tether does not edit
+`.zshrc` or install a shell framework. The agent picker and full conversation
+workspace also offer this theme catalog (saved changes apply to new shells).
+
+Terminal commands remain available as an alternative to the settings menu:
+
+```bash
+tether theme show
+tether theme list
+tether theme set agnoster       # when installed in Oh My Zsh
+tether theme set powerline --shell zsh --font powerline
+tether theme set powerline --font nerd
+tether theme set custom --file ~/.config/zsh/my-theme.zsh
+tether theme set inherit
+```
+
+Choose a Powerline-patched font or [Nerd Font](https://www.nerdfonts.com/) in your
+terminal emulator's font settings to render those glyphs. Tether's terminal UI
+uses the host terminal's font; it cannot select or install fonts for that app.
+The **ascii** mode works with ordinary fonts and is the default. The `--font`
+setting controls Tether's built-in prompt, not a custom or inherited theme.
+Themes require zsh to be installed; the default inherited shell still works
+without it. See [the shell implementation notes](docs/shell-themes.md).
+
+### Runtime migration baseline
+
+The first migration increment adds optional metadata-only Python tracing, a
+versioned task/DAG contract, and an offline end-to-end edit/verification harness:
+
+```bash
+python scripts/runtime_bench.py --output /tmp/tether-baseline --repetitions 5
+```
+
+The output directory must be new. Each case records a pinned fixture commit,
+patch hash, verification command, exit code, log, and elapsed time. The harness
+uses deterministic model replay and real file tools; its simulated token counts
+and timings do not establish real-model quality, latency, or cost improvements.
+Set `runtime_trace_dir` to an absolute directory in Tether's config to trace
+normal Python engine turns. It is disabled by default. See
+[the runtime contracts and limits](docs/runtime-protocol.md).
+
+
 Desktop app
 -----------
 
@@ -154,17 +301,57 @@ in [`docs/repository-handoff.md`](docs/repository-handoff.md).
 Requirements
 ------------
 
-- **Python 3.10 or newer.**
+- **Standalone CLI:** macOS or Linux on arm64 or x86_64; Python is bundled.
+- **Source/development install:** Python 3.10 or newer.
 - **For local mode:** a GGUF model file, plus enough VRAM to load it. CUDA / Metal acceleration is optional but expected. `llama.cpp` is built for you by `tether setup`.
 - **For remote mode:** an API key for your chosen provider. Nothing else to install.
-- `prompt_toolkit` and `pygments` are pulled in automatically as package dependencies.
+- `prompt_toolkit` and `pygments` are bundled in the binary or installed as package dependencies.
 
 
 Install
 -------
 
-The goal is to make `tether` callable from any directory while preserving an
-editable source install.
+### Standalone binary
+
+The release installer downloads the matching binary, verifies its SHA-256,
+and installs it as `~/.local/bin/tether`. No Python environment or repository
+checkout is needed to run it:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/agentrebench/Tether/main/install.sh | sh
+# Open a new terminal if the installer added ~/.local/bin to PATH.
+tether remote <provider>
+tether
+```
+
+The installer adds the directory to zsh/bash startup files when needed and
+prints the command to update the current shell. Other shells receive manual
+PATH instructions. Set `TETHER_INSTALL_DIR` to choose another destination,
+`TETHER_VERSION` to pin a release tag, or use `--no-modify-path` to manage PATH
+yourself. Re-running the installer updates the executable and preserves config
+and sessions. An existing pipx symlink is replaced without modifying its venv.
+
+Release assets are produced by `.github/workflows/cli-binary.yml` on `v*` tags;
+the download installer requires a release containing those assets. To install
+the changes directly from this checkout before a binary release is published:
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install '.[bundle]'
+.venv/bin/python scripts/build_binary.py
+./install.sh --binary ./dist/tether
+tether
+```
+
+The build produces `dist/tether` plus a platform archive and checksum. It bundles
+the interpreter, dependencies, and built-in skills, and excludes local config
+and API keys. Build on each target OS/architecture; local GGUF mode still needs
+`llama.cpp` (`tether setup`). Converting Hugging Face weights to GGUF additionally
+requires a separate Python installation and the conversion dependencies.
+
+### Editable source install
+
+For development, keep an editable Python installation instead:
 
 ### Fast path — clone, seed config, install
 
@@ -183,7 +370,7 @@ tether start                             # terminal REPL
 
 The config keeps `model_path` empty. Set it (or run `tether start` and use the interactive model selector) only when you want local-llama mode.
 
-### Recommended — pipx
+### Editable install with pipx
 
 ```
 brew install pipx          # macOS  (or: sudo apt install pipx on Debian/Ubuntu)
@@ -278,7 +465,7 @@ tether remote                                   # confirms: provider=<name>, api
 tether start
 ```
 
-If neither key source is configured when you run `tether remote <provider>`, it offers to capture and store one inline. Inside the REPL, `/provider <name>` or `/model` switches providers without restarting.
+If neither key source is configured when you run `tether remote <provider>`, it offers to capture and store one inline. Inside the REPL, `/provider <name>` switches providers without restarting. `/model` opens a searchable picker for the active provider; use arrow keys and Enter, or `/model <model-id>` to select directly. `/model list` prints a numbered list, `/model <number>` selects from it, and `/model refresh` reloads the list. Codex reads its installed CLI catalog, including new models such as GPT-6 Astra, while API providers use their own model endpoints. If discovery is unavailable, Tether labels the fallback catalog. `/model stats` shows the active model and token usage.
 
 **Custom OpenAI-compatible endpoint** (anything speaking `/v1/chat/completions`):
 
@@ -420,7 +607,12 @@ Slash commands:
 /summaries                              # list saved conversation summaries
 /provider                               # show current model provider
 /provider <name>                        # switch (e.g. openai, kimi, local)
-/model [stats|local|<provider>]         # LLM model & token usage
+/model                                 # choose a model for the active provider
+/model <id or number>                   # switch within the active provider
+/model list|refresh|stats               # list / refresh models / show usage
+/effort                                # choose this model's reasoning effort
+/effort <level or number>               # set a supported reasoning setting
+/effort list|stats                      # list levels / show current effort
 /persistence [status|build|…]           # the persistent codebase mental model
 /skills                                 # list installed workflow skills
 /learn                                  # capture project learning
@@ -530,10 +722,11 @@ By default Tether auto-approves read and file-edit operations so routine work do
 When `provider` is anything other than `local`, the engine talks to `api_base_url` using the first configured provider environment variable (or that provider's entry in `api_keys`) instead of the local server. Reasoning effort and thinking controls are validated against the selected model; unsupported sampling fields are omitted automatically.
 
 Model lists are not frozen: once a provider has a key, Tether asks its
-`/models` endpoint what it actually serves and merges new ids into the picker
-(newest first, controls inherited from the provider's default model), so a
-model released after this build still shows up. Offline or without a key you
-get the built-in catalog.
+`/models` endpoint what it actually serves and uses that list in the picker
+(newest first, controls inherited from the provider's default model for new
+IDs). Codex uses its CLI's model catalog and priority order. New releases
+appear without a Tether update. Offline or without a key, the built-in catalog
+is available as a labeled fallback.
 
 
 How it works

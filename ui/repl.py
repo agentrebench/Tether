@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import os
+import copy
+from contextlib import nullcontext
+import queue
 import random
 import re
 import shlex
@@ -25,6 +28,8 @@ from ..core.config import (
     CONFIG_DIR,
     REMOTE_PROVIDERS,
     apply_provider_selection,
+    provider_models,
+    reasoning_setting,
 )
 from ..core.permissions import PermissionContext
 from ..engine.backend import InferenceBackend
@@ -89,6 +94,8 @@ def _selfcheck_targets() -> list[str]:
 
 
 def _default_selfcheck_commands(mode: str) -> list[list[str]]:
+    if getattr(sys, "frozen", False):
+        return [[sys.executable, "--version"], [sys.executable, "doctor", "--json"]]
     commands = [
         [sys.executable, "-m", "py_compile", *_selfcheck_targets()],
         [
@@ -341,7 +348,7 @@ def classify_input(raw_line: str, busy: bool, has_pending: bool):
 SLASH_COMMANDS = [
     "/help", "/plan", "/why", "/clear", "/compact", "/history", "/usage",
     "/context", "/session", "/cd", "/save", "/resume", "/memory", "/selfcheck",
-    "/summaries", "/provider", "/model", "/learn", "/skills", "/persistence",
+    "/summaries", "/provider", "/model", "/effort", "/learn", "/skills", "/persistence",
     "/also", "/redirect", "/stop", "/quit", "/exit",
 ]
 
@@ -358,7 +365,8 @@ SLASH_HELP = {
     "/selfcheck": "Run a self-check", "/summaries": "Conversation summaries",
     "/provider": "Switch model provider", "/learn": "Author a skill",
     "/skills": "List / show / forget skills",
-    "/model": "LLM model & token usage", "/persistence": "Codebase mental model",
+    "/model": "Choose a model for the active provider", "/persistence": "Codebase mental model",
+    "/effort": "Choose the model's reasoning effort",
     "/also": "Queue a follow-up mid-turn", "/redirect": "Steer the current turn",
     "/stop": "Interrupt the turn", "/quit": "Exit", "/exit": "Exit",
 }
@@ -366,8 +374,9 @@ SLASH_HELP = {
 # Subcommands surfaced as flat completions ("/persistence build") with their own
 # descriptions, so the menu lists them the way the harness does.
 SLASH_SUBCOMMANDS = {
-    "/model": [("stats", "Show the current model"), ("local", "Switch to local GGUF"),
-               ("api", "Switch to your API model")],
+    "/model": [("list", "List this provider's models"), ("refresh", "Refresh this provider's models"),
+               ("stats", "Show model and token usage")],
+    "/effort": [("list", "List supported reasoning settings"), ("stats", "Show current reasoning setting")],
     "/persistence": [("status", "Model status"), ("build", "Full re-index"),
                ("sync", "Incremental refresh"), ("check", "Run invariants vs. diff"),
                ("ask", "Query the model"), ("gc", "Remove orphaned model DBs")],
@@ -384,10 +393,11 @@ class TetherCompleter(Completer):
     descriptions), plus path arguments for the commands that take one
     (/cd -> directories, /why -> files)."""
 
-    def __init__(self, skill_store=None):
+    def __init__(self, skill_store=None, config=None):
         self._dirs = PathCompleter(expanduser=True, only_directories=True)
         self._files = PathCompleter(expanduser=True)
         self._skill_store = skill_store
+        self._config = config
 
     def _skill_commands(self) -> list[str]:
         if self._skill_store is None:
@@ -415,6 +425,13 @@ class TetherCompleter(Completer):
             entries.append((cmd, SLASH_HELP.get(cmd, "")))
             for sub, desc in SLASH_SUBCOMMANDS.get(cmd, []):
                 entries.append((f"{cmd} {sub}", desc))
+            if cmd == "/model" and self._config is not None and self._config.is_remote:
+                for model in provider_models(self._config.provider, self._config, cached_only=True):
+                    entries.append((f"/model {model['id']}", model.get("label", model["id"])))
+            if cmd == "/effort" and self._config is not None:
+                _, choices, current = reasoning_setting(self._config)
+                for value in choices:
+                    entries.append((f"/effort {value}", "Current setting" if value == current else "Set reasoning"))
         for sc in self._skill_commands():
             entries.append((sc, "skill"))
         return entries
@@ -488,15 +505,23 @@ def context_indicator(engine: QueryEngine, config: TetherConfig) -> str:
 
 
 class TetherREPL:
-    def __init__(self, config: TetherConfig):
+    def __init__(self, config: TetherConfig, *, plain: bool = False):
         self.config = config
+        self._plain = plain
+        from .native_activity import NativeActivity
+        self._native_activity = NativeActivity()
+        self._workspace = None
         self.permissions = PermissionContext.from_config(config)
         self.tool_registry = ToolRegistry.build_default(
             include_codebase_model=getattr(config, "codebase_model_enabled", False))
         self.history = HistoryLog()
         self.session = StoredSession.new(cwd=os.getcwd())
 
-        agent_tool = AgentTool(config, self.tool_registry, self.permissions)
+        agent_tool = AgentTool(
+            config, self.tool_registry, self.permissions,
+            on_agent_update=self._on_agent_update,
+            on_approval_request=self._approval,
+        )
         self.tool_registry.tools["agent"] = agent_tool
 
         # Mediates the single keyboard between the main loop and a background
@@ -569,16 +594,58 @@ class TetherREPL:
             style=self._toolbar_style,
             history=history,
             auto_suggest=AutoSuggestFromHistory(),
-            completer=TetherCompleter(skill_store=self.skill_store),
+            completer=TetherCompleter(skill_store=self.skill_store, config=self.config),
             complete_while_typing=True,
         )
         self.last_selfcheck_report: Path | None = None
 
     def run(self, resume: str = "") -> int:
+        """Use the persistent workspace on a terminal; retain plain output for pipes."""
+        if not self._plain and sys.stdin.isatty() and sys.stdout.isatty() and os.environ.get("TERM") != "dumb":
+            from .workspace import TerminalWorkspace
+            self._workspace = TerminalWorkspace(self)
+            try:
+                return self._workspace.run(lambda: self._run_session(resume))
+            finally:
+                self._workspace = None
+                self._native_idle()
+                self.tool_registry.close()
+        try:
+            return self._run_session(resume)
+        finally:
+            self._native_idle()
+            self.tool_registry.close()
+
+    def _native_idle(self):
+        activity = getattr(self, "_native_activity", None)
+        if activity is not None:
+            activity.idle()
+
+    def _on_stream_event(self, event):
+        activity = getattr(self, "_native_activity", None)
+        if activity is not None:
+            activity.stream(event)
+
+    def _native_waiting(self):
+        activity = getattr(self, "_native_activity", None)
+        return activity.waiting() if activity is not None else nullcontext()
+
+    def _on_turn_error(self, exc):
+        self._native_idle()
+        print(error(f"Error: {exc}"))
+
+    def _on_agent_update(self, snapshot: dict) -> None:
+        activity = getattr(self, "_native_activity", None)
+        if activity is not None:
+            activity.agent(snapshot)
+        if self._workspace is not None:
+            self._workspace.update_agent(snapshot)
+
+    def _run_session(self, resume: str = "") -> int:
         """Run the REPL. ``resume`` restores a saved conversation first:
         "@latest" (or "") from --continue picks the most recent session,
         anything else is treated as a session id."""
-        print_banner()
+        print_banner(compact=self._workspace is not None)
 
         backend = InferenceBackend(self.config)
         if not backend.health_check():
@@ -607,6 +674,7 @@ class TetherREPL:
             tool_registry=self.tool_registry,
             permissions=self.permissions,
             on_approval_request=self._approval,
+            on_stream_event=self._on_stream_event,
         )
         self._engine = engine
 
@@ -652,7 +720,8 @@ class TetherREPL:
         # generation — /also to queue, /redirect or Esc/Ctrl-C to interrupt.
         controller = TurnController(
             engine,
-            on_error=lambda exc: print(error(f"Error: {exc}")),
+            on_error=self._on_turn_error,
+            on_idle=self._native_idle,
             on_turn_complete=self._on_turn_complete,
         )
         self._controller = controller
@@ -695,11 +764,14 @@ class TetherREPL:
             if note:
                 print(note)
             if action == "redirect":
+                self._native_idle()
                 controller.redirect(payload)
             else:
                 controller.feed(payload)
             self._run_busy_phase(controller)
 
+        self._broker.cancel()
+        self._native_idle()
         controller.interrupt()
         controller.wait(timeout=5.0)
 
@@ -1250,17 +1322,13 @@ class TetherREPL:
                   "/persistence check [files…] · /persistence ask <q>"))
 
     def _handle_model(self, parts: list[str], engine: QueryEngine) -> None:
-        """/model — the LLM you're running.
-
-          /model stats        show the current model + token usage
-          /model local        switch to the local GGUF model
-          /model api [name]   switch to an API-key model (auto-picks the provider
-                              whose key is set; name one to override)
-
-        A bare /model shows stats. Switching reuses the provider machinery."""
+        """List/select models from the active provider, without changing providers."""
         sub = parts[1].split() if len(parts) > 1 else []
-        action = sub[0].lower() if sub else "stats"
+        action = sub[0].lower() if sub else ""
 
+        if action in ("", "list", "refresh"):
+            self._list_models(force=action == "refresh", picker=action != "list")
+            return
         if action in ("stats", "status", "info"):
             self._show_model_stats(engine)
             return
@@ -1274,8 +1342,59 @@ class TetherREPL:
         if action in REMOTE_PROVIDERS:
             self._handle_provider(["/model", action], engine)
             return
-        print(warning(f"Unknown option '{action}'. Use: /model stats · "
-                      "/model local · /model api"))
+        if not self.config.is_remote:
+            self._list_models()
+            return
+        model_id = " ".join(sub)
+        if model_id.isdecimal():
+            provider, models = getattr(self, "_listed_models", ("", []))
+            index = int(model_id) - 1
+            if provider != self.config.provider or not 0 <= index < len(models):
+                print(warning("  Run /model to see the current provider's numbered model list."))
+                return
+            model_id = models[index]["id"]
+        try:
+            if self.config.provider == "custom":
+                self.config.api_model = model_id
+            else:
+                apply_provider_selection(self.config, self.config.provider, model_id)
+        except ValueError as exc:
+            print(warning(f"  {exc}. Run /model to see this provider's models."))
+            return
+        self.config.save()
+        print(success(f"  switched to {self.config.provider} ({self.config.api_model})"))
+
+    def _list_models(self, *, force: bool = False, picker: bool = False) -> None:
+        cfg = self.config
+        if not cfg.is_remote:
+            # llama-server loads one GGUF at startup; listing a file must not
+            # pretend that changing model_path hot-swapped the running server.
+            from ..cli import discover_models
+            models = discover_models(extra_dirs=[Path(p) for p in cfg.gguf_dirs])
+            print(bold("  Local GGUF models"))
+            for model in models:
+                print(f"    {model.path}")
+            print(dim("  Load a local model with: tether start --model <path>"))
+            return
+        models = provider_models(cfg.provider, cfg, force=force)
+        # Keep the current selection visible even during a discovery outage.
+        if cfg.api_model and not any(m["id"] == cfg.api_model for m in models):
+            models.append({"id": cfg.api_model, "label": cfg.api_model,
+                           "description": "Current model (not in provider listing)"})
+        self._listed_models = (cfg.provider, models)
+        label = REMOTE_PROVIDERS.get(cfg.provider, {}).get("label", cfg.provider)
+        print(bold(f"  {label} models · current: {cfg.api_model}"))
+        if cfg.is_codex:
+            source = "Codex CLI catalog" if any(m.get("discovered") for m in models) else "Offline catalog"
+        else:
+            source = "Provider model list" if any(m.get("discovered") for m in models) else "Offline catalog · live list unavailable"
+        print(dim(f"  {source}"))
+        for index, model in enumerate(models, 1):
+            current = " *" if model["id"] == cfg.api_model else ""
+            print(f"  {index:>2}. {model['id']}{current}")
+        print(dim("  Choose with /model <number or model-id> · /model refresh · /model stats"))
+        if picker and getattr(self, "_workspace", None) is not None and models:
+            self._workspace.open_models(models, label, source)
 
     def _show_model_stats(self, engine: QueryEngine) -> None:
         """Show what /model currently reflects: the active model, whether it's
@@ -1288,18 +1407,69 @@ class TetherREPL:
             print(f"  model:    {bold(cfg.provider)} · {cfg.api_model}  {dim('(API)')}")
             print(f"  api key:  ${cfg.api_key_env}: "
                   f"{success('set') if key_set else warning('NOT SET')}")
-            if cfg.reasoning_effort:
-                print(f"  thinking: {cfg.reasoning_effort}")
         else:
             model = Path(cfg.model_path).stem if cfg.model_path else "(none)"
             print(f"  model:    {bold('local')} · {model}  {dim('(GGUF)')}")
             print(f"  server:   {cfg.server_url}")
+        if cfg.is_remote:
+            _, _, current = reasoning_setting(cfg)
+            print(f"  effort:   {current}")
         print(f"  context:  {cfg.context_size:,}")
         u = getattr(engine, "usage", None)
         if u is not None:
             print(f"  tokens:   {u.input_tokens:,} in · {u.output_tokens:,} out "
                   f"· {u.total:,} total")
-        print(dim("  change with: /model local · /model api"))
+        print(dim("  choose a model: /model · reasoning: /effort · provider: /provider <name>"))
+
+    def _handle_effort(self, parts: list[str], engine: QueryEngine) -> None:
+        """Choose an effort supported by the active model; keep other settings."""
+        cfg = self.config
+        field, choices, current = reasoning_setting(cfg)
+        action = parts[1].strip().lower() if len(parts) > 1 else ""
+        print(bold(f"  {cfg.provider} · {cfg.api_model or 'local model'} · effort: {current}"))
+        if not choices:
+            print(dim("  No configurable reasoning levels are available for this model in Tether."))
+            return
+        if action in ("stats", "status", "info"):
+            return
+        if action in ("", "list"):
+            self._listed_efforts = (cfg.provider, cfg.api_model, choices)
+            for index, value in enumerate(choices, 1):
+                marker = " *" if value == current else ""
+                print(f"  {index:>2}. {value}{marker}")
+            print(dim("  Choose with /effort <level or number> · /effort stats"))
+            if not action and getattr(self, "_workspace", None) is not None:
+                self._workspace.open_effort(choices, current, f"{cfg.api_model} · current: {current}")
+            return
+        if action.isdecimal():
+            provider, model, listed = getattr(self, "_listed_efforts", ("", "", []))
+            index = int(action) - 1
+            if (provider, model) != (cfg.provider, cfg.api_model) or not 0 <= index < len(listed):
+                print(warning("  Run /effort to see this model's numbered reasoning settings."))
+                return
+            action = listed[index]
+        if action not in choices:
+            print(warning(f"  Unsupported reasoning setting '{action}'. Choose: {', '.join(choices)}"))
+            return
+        # Use the existing provider validation/normalization without resetting
+        # user-tuned context, endpoints, budgets, credentials, or the model.
+        candidate = copy.deepcopy(cfg)
+        options = {field: action}
+        if field == "reasoning_effort" and cfg.thinking_mode:
+            options["thinking_mode"] = cfg.thinking_mode
+        if field == "thinking_mode" and cfg.reasoning_effort:
+            options["reasoning_effort"] = cfg.reasoning_effort
+        try:
+            apply_provider_selection(candidate, cfg.provider, cfg.api_model, **options)
+        except ValueError as exc:
+            print(warning(f"  {exc}"))
+            return
+        for name in ("reasoning_effort", "reasoning_effort_max", "thinking_mode", "omit_sampling"):
+            setattr(cfg, name, getattr(candidate, name))
+        cfg.save()
+        print(success(f"  reasoning set to {action} for {cfg.api_model}"))
+        if getattr(engine, "plan_mode", False) and cfg.reasoning_effort and not cfg.is_codex:
+            print(dim(f"  Plan mode uses {cfg.reasoning_effort_max or 'max'}; /plan off uses your selected effort."))
 
     def _switch_to_api(self, engine: QueryEngine, explicit: str = "") -> None:
         """Switch to an API-key model. With no name, auto-pick the provider whose
@@ -1392,7 +1562,7 @@ class TetherREPL:
         if cfg.reasoning_effort:
             msg += f", thinking={cfg.reasoning_effort}"
         print(success(msg))
-        if not cfg.has_api_key():
+        if not cfg.is_codex and not cfg.has_api_key():
             print(warning(f"  ${cfg.api_key_env} is not set — requests will fail"))
 
     def _handle_selfcheck(self, parts: list[str], engine: QueryEngine) -> None:
@@ -1462,7 +1632,11 @@ class TetherREPL:
   /persistence build|sync|check|ask <q>|gc
 
 {bold('Model & provider')}
-  /model stats|local|api    The LLM you're running / switch it
+  /model                   Choose from the active provider's models
+  /model <id or number>    Switch model within the active provider
+  /model refresh|stats    Refresh models / show model and usage
+  /effort [<level>]       Choose or set this model's reasoning effort
+  /effort list|stats      List supported levels / show current effort
   /provider [<name>]        Show or switch remote provider
 
 {bold('While a task is running')}
@@ -1517,6 +1691,10 @@ class TetherREPL:
             self._handle_model(parts, engine)
             return True
 
+        if command == "/effort":
+            self._handle_effort(parts, engine)
+            return True
+
         if command == "/clear":
             engine.messages = engine.messages[:1]
             engine.turn_count = 0
@@ -1557,15 +1735,7 @@ class TetherREPL:
 
         if command == "/cd":
             target = parts[1] if len(parts) > 1 else os.path.expanduser("~")
-            target = os.path.expanduser(target)
-            if os.path.isdir(target):
-                os.chdir(target)
-                bash_tool = self.tool_registry.get("bash")
-                if bash_tool:
-                    bash_tool._default_cwd = os.getcwd()
-                print(success(f"Changed to: {os.getcwd()}"))
-            else:
-                print(error(f"Not a directory: {target}"))
+            self._change_directory(Path(target), engine)
             return True
 
         if command == "/save":
@@ -1609,6 +1779,42 @@ class TetherREPL:
         print(warning(f"Unknown command: {command}"))
         return True
 
+    def _change_directory(self, target: Path, engine) -> None:
+        if self._workspace and self._workspace.directory_busy():
+            message = "Finish or stop Tether's running agents before changing project folders."
+            print(warning(message))
+            self._workspace.directory_changed(error=message)
+            return
+        try:
+            target = target.expanduser().resolve(strict=True)
+            os.chdir(target)
+        except (OSError, ValueError) as exc:
+            message = f"Cannot open directory: {exc}"
+            print(error(message))
+            if self._workspace:
+                self._workspace.directory_changed(error=message)
+            return
+        self.session.cwd = str(target)
+        bash_tool = self.tool_registry.get("bash")
+        if bash_tool:
+            bash_tool.set_cwd(str(target))
+        engine.set_persistent_context_enabled(engine.persistent_context_enabled)
+        self.codebase_model = None
+        if getattr(self.config, "codebase_model_enabled", False):
+            try:
+                from ..core.codebase_model.service import _resolve_root, get_model
+
+                if _resolve_root(str(target)) != Path.home():
+                    self.codebase_model = get_model(str(target))
+                    self.codebase_model.beliefs.max_beliefs = self.config.codebase_model_max_beliefs
+                    self.codebase_model.indexer.max_files = self.config.codebase_model_max_files
+            except Exception as exc:
+                print(warning(f"Codebase model unavailable: {exc}"))
+        engine.on_edit_hook = self._model_on_edit if self.codebase_model else None
+        print(success(f"Changed to: {target}"))
+        if self._workspace:
+            self._workspace.directory_changed(target)
+
     def _run_busy_phase(self, controller) -> None:
         """Drive a running turn: the engine streams to the terminal directly
         while we poll stdin for type-ahead. Returns when the turn(s) go idle.
@@ -1619,6 +1825,26 @@ class TetherREPL:
         a pending broker request (tool approval / clarifying question) is fed the
         next typed line instead of being treated as an /also."""
         import select
+
+        if self._workspace is not None:
+            if self.codebase_model is not None:
+                self.codebase_model.sync_if_commit_changed()
+            while controller.is_busy():
+                try:
+                    line = self._workspace.read_line(timeout=0.2)
+                except queue.Empty:
+                    continue
+                except (EOFError, KeyboardInterrupt):
+                    self._native_idle()
+                    controller.interrupt()
+                    self._broker.cancel()
+                    break
+                if isinstance(line, Path):
+                    self._workspace.directory_changed(error="Stop the current Tether task before changing project folders.")
+                    continue
+                if not self._broker.fulfill(line):
+                    self._dispatch_busy_line(line, controller)
+            return
 
         # VCS may have moved under us mid-session (pull/checkout in another
         # terminal). One rev-parse when clean; an incremental sync when not.
@@ -1674,6 +1900,7 @@ class TetherREPL:
                         continue
                     line = sys.stdin.readline()
                 except KeyboardInterrupt:
+                    self._native_idle()
                     controller.interrupt()
                     self._broker.cancel()
                     print(f"\n{warning('Interrupting…')}")
@@ -1684,6 +1911,7 @@ class TetherREPL:
                     continue
 
                 if line == "":  # EOF / Ctrl-D while busy
+                    self._native_idle()
                     controller.interrupt()
                     self._broker.cancel()
                     break
@@ -1707,9 +1935,11 @@ class TetherREPL:
         if action == "noop":
             return
         if action == "interrupt":
+            self._native_idle()
             controller.interrupt()
             print(warning("Interrupting…"))
         elif action == "redirect":
+            self._native_idle()
             controller.redirect(payload)
             print(f"{MAGENTA}↻ redirecting{RESET}")
         elif action == "also":
@@ -1778,6 +2008,7 @@ class TetherREPL:
 
     def _on_turn_complete(self, result, elapsed: float = 0.0) -> None:
         """Bookkeeping + a compact footer after each background turn."""
+        self._native_idle()
         eng = self._engine
         self.history.add("turn", f"tools={result.tool_calls_made} stop={result.stop_reason}")
         # Automatic learning: one small extraction call per substantive turn,
@@ -1850,10 +2081,16 @@ class TetherREPL:
         print()
 
     def _approval(self, tool_name: str, arguments: dict):
+        with self._native_waiting():
+            return self._approval_input(tool_name, arguments)
+
+    def _approval_input(self, tool_name: str, arguments: dict):
         """Approval prompt that works during a background turn by collecting the
         answer through the broker. Sub-agents (no interactive marker) fall back
         to the legacy direct-input path."""
-        if not is_interactive_turn():
+        if not is_interactive_turn() and not (
+            self._controller is not None and self._controller.is_busy()
+        ):
             return request_approval(tool_name, arguments)
         print(f"\n  {YELLOW}{BOLD}Approval required{RESET}")
         if tool_name == "agent":
@@ -1876,6 +2113,10 @@ class TetherREPL:
         return resp
 
     def _ask_clarifying(self, questions: list[dict]) -> list[dict]:
+        with self._native_waiting():
+            return self._ask_clarifying_input(questions)
+
+    def _ask_clarifying_input(self, questions: list[dict]) -> list[dict]:
         """Broker-backed version of ask_clarifying_questions: collects each
         answer through the main loop so a background turn can ask the user."""
         print(f"\n  {CYAN}{BOLD}A few quick questions before I start:{RESET}")
@@ -1989,6 +2230,10 @@ class TetherREPL:
             f"turns {turns}",
             f"{cwd}",
         ]
+        if self.config.is_remote:
+            _, choices, current = reasoning_setting(self.config)
+            if choices or current != "default":
+                parts.insert(1, f"effort {current}")
         if getattr(engine, "plan_mode", False):
             parts.insert(0, "<style fg='#c6a0f6'><b>PLAN</b></style>")
         return HTML("  ·  ".join(parts))
@@ -2002,6 +2247,12 @@ class TetherREPL:
         auto-suggest and the enter/paste key handling are all preserved, and ANY
         prompt_toolkit failure degrades to the plain prompt so typing is never
         impossible. EOF / Ctrl-C propagate exactly as the classic prompt did."""
+        if self._workspace is not None:
+            while True:
+                line = self._workspace.read_line()
+                if not isinstance(line, Path):
+                    return line
+                self._change_directory(line, engine)
         try:
             from prompt_toolkit.application import Application
             from prompt_toolkit.buffer import Buffer
@@ -2015,7 +2266,7 @@ class TetherREPL:
             from prompt_toolkit.layout.processors import BeforeInput
 
             buf = Buffer(
-                completer=TetherCompleter(skill_store=self.skill_store),
+                completer=TetherCompleter(skill_store=self.skill_store, config=self.config),
                 complete_while_typing=True,
                 history=self._history,
                 auto_suggest=AutoSuggestFromHistory(),

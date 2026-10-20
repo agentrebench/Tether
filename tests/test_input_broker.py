@@ -28,6 +28,8 @@ class Broker(unittest.TestCase):
         self.assertTrue(wait_until(b.has_pending))
         self.assertEqual(b.hint(), "approve?")
         self.assertTrue(b.fulfill("y"))
+        self.assertFalse(b.has_pending())
+        self.assertFalse(b.fulfill("n"))  # rapid next submission cannot overwrite approval
         t.join(2.0)
         self.assertEqual(box["r"], "y")
         self.assertFalse(b.has_pending())

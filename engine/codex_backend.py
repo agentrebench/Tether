@@ -19,11 +19,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from ..core.config import TetherConfig
+from ..core.config import TetherConfig, default_provider_model
 from ..core.models import Message, StreamEvent, ToolDefinition
 
 
-DEFAULT_CODEX_MODEL = "gpt-5.6-sol"
 DEFAULT_CODEX_TIMEOUT_SEC = 900
 DEFAULT_PROMPT_HISTORY_CHARS = 60_000
 
@@ -326,7 +325,7 @@ class CodexExecBackend:
         # Advanced deployments can explicitly override the sandbox.
         sandbox = os.environ.get("TETHER_CODEX_SANDBOX", "read-only")
         approval = os.environ.get("TETHER_CODEX_APPROVAL", "never")
-        model = (self.config.api_model or DEFAULT_CODEX_MODEL).strip()
+        model = (self.config.api_model or default_provider_model("codex")).strip()
 
         cmd = [
             exe,

@@ -179,7 +179,7 @@ class LiveModelDiscovery(unittest.TestCase):
         self.config.api_keys = {"openai": "k"}
         with self._patch_urlopen(["gpt-5.6", "text-embedding-3-large", "gpt-5.5-2026-04-23", "whisper-1", "sol"]):
             ids = self.cfg.discover_provider_models(self.config, "openai")
-        self.assertEqual(ids, ["gpt-5.6", "sol"])
+        self.assertEqual(ids, ["gpt-5.6", "gpt-5.5-2026-04-23", "sol"])
 
     def test_version_sort(self):
         k = self.cfg._version_sort_key

@@ -630,6 +630,7 @@ class QueryEngine:
         self.permissions = permissions
         self.messages: list[Message] = []
         self.usage = UsageSummary()
+        self._runtime_trace = None
         self.turn_count = 0
         self.on_approval_request = on_approval_request
         # Presentation-neutral event sink used by the desktop bridge. Terminal
@@ -864,6 +865,39 @@ class QueryEngine:
         return self._detector or None
 
     def submit(self, user_input: str, cancel_event=None, images: list[str] | None = None) -> TurnResult:
+        from ..runtime.tracing import RunTrace
+
+        trace = RunTrace.open(self.config)
+        if trace is None:
+            return self._submit(user_input, cancel_event=cancel_event, images=images)
+        self._runtime_trace = trace
+        before = self.usage
+        result = None
+        try:
+            result = self._submit(user_input, cancel_event=cancel_event, images=images)
+            return result
+        finally:
+            self._runtime_trace = None
+            trace.finish("returned" if result is not None else "raised",
+                         result.stop_reason if result is not None else "exception",
+                         (self.usage.input_tokens - before.input_tokens,
+                          self.usage.output_tokens - before.output_tokens))
+
+    def _model_completion(self, **kwargs):
+        self._emit_stream_event(StreamEvent(type="model_started"))
+        try:
+            trace = self._runtime_trace
+            if trace is None:
+                return self.backend.chat_completion_stream_parsed(**kwargs)
+            with trace.span("model", self.config.api_model or "local") as metrics:
+                message, usage = self.backend.chat_completion_stream_parsed(**kwargs)
+                metrics.update(input_tokens=usage.get("prompt_tokens", 0),
+                               output_tokens=usage.get("completion_tokens", 0))
+                return message, usage
+        finally:
+            self._emit_stream_event(StreamEvent(type="model_finished"))
+
+    def _submit(self, user_input: str, cancel_event=None, images: list[str] | None = None) -> TurnResult:
         """Submit user input and run the agentic loop with streaming output.
 
         When `cancel_event` (a threading.Event) is supplied, the turn is
@@ -1053,7 +1087,7 @@ class QueryEngine:
                 ))
 
             try:
-                assistant_msg, raw_usage = self.backend.chat_completion_stream_parsed(
+                assistant_msg, raw_usage = self._model_completion(
                     messages=self._messages_for_inference(),
                     tools=self.tools.definitions(),
                     temperature=self.config.temperature,
@@ -1586,7 +1620,7 @@ class QueryEngine:
             self._emit_stream_event(StreamEvent(type="text", text=text))
 
         try:
-            assistant_msg, raw_usage = self.backend.chat_completion_stream_parsed(
+            assistant_msg, raw_usage = self._model_completion(
                 messages=self._messages_for_inference(),
                 tools=None,
                 temperature=self.config.temperature,
@@ -1783,6 +1817,15 @@ class QueryEngine:
         return result
 
     def _execute_tool_with_status(self, tc) -> ToolResult:
+        trace = self._runtime_trace
+        if trace is None:
+            return self._execute_tool_with_status_impl(tc)
+        with trace.span("tool", tc.name if self.tools.get(tc.name) else "unknown") as metrics:
+            result = self._execute_tool_with_status_impl(tc)
+            metrics.update(is_error=result.is_error, output_bytes=len(result.content.encode("utf-8")))
+            return result
+
+    def _execute_tool_with_status_impl(self, tc) -> ToolResult:
         tool = self.tools.get(tc.name)
         if not tool:
             result = ToolResult(

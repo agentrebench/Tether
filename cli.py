@@ -655,7 +655,10 @@ def _convert_to_gguf(model: DiscoveredModel) -> Path | None:
         return None
 
     # Check that the venv has the needed deps (transformers, torch)
-    python = sys.executable
+    python = shutil.which("python3") if getattr(sys, "frozen", False) else sys.executable
+    if not python:
+        print("Converting Hugging Face weights needs Python 3. Use a GGUF file or install Python 3 first.")
+        return None
 
     # Pre-quantized models (NVFP4, FP8, etc.) should be converted with
     # --outtype auto to preserve native quantization.  No further quantize step.
@@ -1344,12 +1347,36 @@ def _resume_target(args: argparse.Namespace) -> str:
     return ""
 
 
+def _select_terminal_agent(args: argparse.Namespace, config: TetherConfig) -> bool:
+    """Interactive terminal entry only; explicit models, resumes and pipes skip it."""
+    if (getattr(args, "plain", False) or getattr(args, "model", None) or _resume_target(args)
+            or not sys.stdin.isatty() or not sys.stdout.isatty() or os.environ.get("TERM") == "dumb"):
+        return True
+    from .ui.agent_picker import select_agent
+
+    return select_agent(config)
+
+
+def cmd_terminal(args: argparse.Namespace) -> int:
+    """A normal shell is available before any provider or authentication work."""
+    if not sys.stdin.isatty() or not sys.stdout.isatty() or os.environ.get("TERM") == "dumb":
+        print("The terminal workspace requires an interactive terminal.", file=sys.stderr)
+        return 2
+    from .ui.shell_workspace import ShellWorkspace
+
+    return ShellWorkspace(TetherConfig.load()).run() or 0
+
+
 def cmd_start(args: argparse.Namespace) -> int:
     """Start server (if needed) + REPL in one command."""
     from .ui.repl import TetherREPL
     from .ui.colors import dim, success
 
     config = TetherConfig.load()
+    if not _select_terminal_agent(args, config):
+        return 0
+    if getattr(args, "compact", False):
+        args.plain = True
     if args.port:
         config.port = args.port
 
@@ -1397,7 +1424,7 @@ def cmd_start(args: argparse.Namespace) -> int:
             return 1
 
     try:
-        repl = TetherREPL(config)
+        repl = TetherREPL(config, plain=getattr(args, "plain", False))
         return repl.run(resume=_resume_target(args))
     finally:
         if server_proc and server_proc.poll() is None:
@@ -1496,6 +1523,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     from .ui.colors import success, dim
 
     config = TetherConfig.load()
+    if not _select_terminal_agent(args, config):
+        return 0
     if args.port:
         config.port = args.port
 
@@ -1544,7 +1573,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             return 1
 
     try:
-        repl = TetherREPL(config)
+        repl = TetherREPL(config, plain=getattr(args, "plain", False))
         return repl.run(resume=_resume_target(args))
     finally:
         if server_proc and server_proc.poll() is None:
@@ -1719,6 +1748,42 @@ def config_for_display(config: TetherConfig) -> dict:
     return data
 
 
+def cmd_theme(args: argparse.Namespace) -> int:
+    """Configure themes without launching a provider or modifying shell files."""
+    import json
+    from .ui.shell_theme import save_settings
+    from .ui.theme_catalog import theme_catalog
+
+    config = TetherConfig.load()
+    if args.action == "list":
+        for theme in theme_catalog():
+            print(f"{theme.id:32} {theme.source}")
+        return 0
+    if args.action == "show":
+        print(json.dumps({key: getattr(config, key) for key in (
+            "terminal_shell", "terminal_theme", "terminal_font_mode", "terminal_theme_file",
+        )}, indent=2))
+        print("Browse installed themes: tether theme list, or click Settings in Tether.")
+        print("Select a Powerline/Nerd Font in your terminal before enabling its glyphs.")
+        return 0
+    if not args.theme:
+        print("Choose a theme from tether theme list: tether theme set NAME", file=sys.stderr)
+        return 2
+    shell = args.shell if args.shell is not None else config.terminal_shell
+    font = args.font if args.font is not None else config.terminal_font_mode
+    theme_file = args.file if args.file is not None else config.terminal_theme_file
+    theme = args.theme
+    if theme not in {item.id for item in theme_catalog()} and ":" not in theme:
+        theme = "omz:" + theme
+    try:
+        save_settings(config, shell, theme, font, theme_file)
+    except (OSError, ValueError) as exc:
+        print(f"Cannot save shell theme: {exc}", file=sys.stderr)
+        return 2
+    print("Shell theme saved. Open a new terminal to use it.")
+    return 0
+
+
 def cmd_key(args: argparse.Namespace) -> int:
     """Manage the stored API key (fallback when $api_key_env is unset)."""
     import getpass
@@ -1880,9 +1945,14 @@ def build_parser() -> argparse.ArgumentParser:
              "(no id = most recent; list them with /resume inside the REPL)",
     )
     parser.add_argument("--version", action="version", version=f"tether {__version__}")
+    parser.add_argument("--plain", action="store_true", help="Use the scrolling REPL without the agent sidebar")
     subparsers = parser.add_subparsers(dest="command")
 
-    start_parser = subparsers.add_parser("start", help="Start server (if needed) + REPL")
+    subparsers.add_parser("terminal", help="Open the terminal workspace without agent setup")
+    start_parser = subparsers.add_parser("start", aliases=["chat"], help="Choose an agent and start a Tether chat")
+    start_parser.add_argument("--compact", action="store_true", help="Use compact chat after choosing an agent")
+    start_parser.add_argument("--plain", action="store_true", default=argparse.SUPPRESS,
+                              help="Use the scrolling REPL without the agent sidebar")
     start_parser.add_argument("--port", type=int, help="Server port")
     start_parser.add_argument("--model", type=str, help="Path to GGUF model (skip interactive selector)")
     start_parser.add_argument(
@@ -1902,6 +1972,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     run_parser = subparsers.add_parser("run", help="Start server (if needed) + REPL")
+    run_parser.add_argument("--plain", action="store_true", default=argparse.SUPPRESS,
+                            help="Use the scrolling REPL without the agent sidebar")
     run_parser.add_argument("--port", type=int, help="Server port")
     run_parser.add_argument("--model", type=str, help="Path to GGUF model (skip interactive selector)")
     run_parser.add_argument(
@@ -1985,6 +2057,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     app_bridge_parser.add_argument("--project", required=True, help=argparse.SUPPRESS)
 
+    theme_parser = subparsers.add_parser("theme", help="Configure zsh themes and Powerline/Nerd Font glyphs")
+    theme_parser.add_argument("action", nargs="?", default="show", choices=["show", "set", "list"])
+    theme_parser.add_argument("theme", nargs="?", help="Built-in theme or an installed name from theme list")
+    theme_parser.add_argument("--shell", help="Shell executable; themes require zsh")
+    theme_parser.add_argument("--font", choices=["ascii", "powerline", "nerd"])
+    theme_parser.add_argument("--file", help="Local zsh theme file for the custom theme")
+
+    native_parser = subparsers.add_parser("native-app", help=argparse.SUPPRESS)
+    native_parser.add_argument("action", choices=["settings", "save-settings", "shell", "agent"])
+    native_parser.add_argument("--theme", help=argparse.SUPPRESS)
+    native_parser.add_argument("--cwd", help=argparse.SUPPRESS)
+
+    shell_parser = subparsers.add_parser("terminal-shell", help=argparse.SUPPRESS)
+    shell_parser.add_argument("--shell", required=True, help=argparse.SUPPRESS)
+    shell_parser.add_argument("--command", dest="child_command", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
+
     return parser
 
 
@@ -1996,7 +2084,15 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    if args.command == "start":
+    if args.command == "native-app":
+        from .native_app import run_native_app
+        return run_native_app(args)
+    elif args.command == "terminal-shell":
+        from .ui.terminal_backend import enter_shell
+        return enter_shell(args.shell, args.child_command)
+    elif args.command == "terminal":
+        return cmd_terminal(args)
+    elif args.command in ("start", "chat"):
         return cmd_start(args)
     elif args.command == "run":
         return cmd_run(args)
@@ -2014,6 +2110,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_key(args)
     elif args.command == "models":
         return cmd_models(args)
+    elif args.command == "theme":
+        return cmd_theme(args)
     elif args.command == "config":
         config = TetherConfig.load()
         import json
@@ -2025,4 +2123,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         args.port = None
         args.model = None
+        if (not args.plain and not _resume_target(args) and sys.stdin.isatty()
+                and sys.stdout.isatty() and os.environ.get("TERM") != "dumb"):
+            return cmd_terminal(args)
         return cmd_start(args)

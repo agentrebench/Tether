@@ -34,6 +34,8 @@ class StreamEvent:
     type:
       - "text": new assistant text chunk (delta). `text` holds the delta.
       - "thinking": reasoning-channel delta (DeepSeek/o1-style). Optional UI.
+      - "model_started": an actual model request begins; no private text.
+      - "model_finished": that request returned or raised; no private text.
       - "tool_running": a tool is in flight. `tool_name` + `tool_args_preview` set.
       - "tool_done": tool finished. `tool_name` + optional `tool_output_preview`.
       - "checkpoint": the tool-cycle safety cap fired and a final summary is being prepared.

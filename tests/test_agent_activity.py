@@ -187,8 +187,8 @@ class AgentActivityTests(unittest.TestCase):
             set(terminal),
             {
                 "agent_id", "agent_number", "revision", "label", "task",
-                "agent_type", "status", "activity", "tool_calls", "output",
-                "tokens", "elapsed_seconds",
+                "agent_type", "status", "phase", "activity", "tool_calls", "output",
+                "tokens", "elapsed_seconds", "provider", "model",
             },
         )
         self.assertEqual(terminal["tool_calls"][0]["status"], "completed")

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 import re
@@ -9,6 +10,7 @@ import stat
 import threading
 import time
 import urllib.request
+import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -371,18 +373,18 @@ REMOTE_PROVIDERS = {
 # synthesized from the preset's default model so they can be selected with
 # sensible reasoning/thinking controls. Results are cached per process.
 _DISCOVERY_TTL_SECONDS = 600
-_discovered_models: dict[str, tuple[float, list[str]]] = {}
+_discovered_models: dict[tuple[str, str, str], tuple[float, list[str]]] = {}
 _discovery_lock = threading.Lock()
 
 
-def _models_endpoint(provider: str) -> str:
+def _models_endpoint(provider: str, config: "TetherConfig | None" = None) -> str:
     preset = REMOTE_PROVIDERS.get(provider, {})
     if "models_endpoint" in preset and preset.get("models_endpoint") is None:
         return ""  # explicitly no discovery for this provider
     explicit = preset.get("models_endpoint")
     if explicit:
         return str(explicit)
-    base = str(preset.get("api_base_url", "")).rstrip("/")
+    base = str(config.api_base_url if provider == "custom" and config else preset.get("api_base_url", "")).rstrip("/")
     if not base:
         return ""
     # Same rule as the chat-completions URL: honour a versioned base
@@ -400,16 +402,14 @@ def _discovery_headers(provider: str, key: str) -> dict[str, str]:
 
 
 # Ids that are real but not chat/agent models (embeddings, speech, image,
-# dated snapshots, legacy families). Everything else is kept, so a brand-new
+# models requiring a different transport). Everything else is kept, so a brand-new
 # name the catalog has never heard of still shows up.
 _DISCOVERY_EXCLUDE = {
     "openai": re.compile(
         r"(embedding|tts|whisper|transcribe|realtime|audio|image|dall-e|moderation|"
-        r"davinci|babbage|instruct|search-preview|codex|computer-use|sora|omni-)"
-        r"|-\d{4}-\d{2}-\d{2}$|-\d{4}$",
+        r"davinci|babbage|instruct|search-preview|codex|computer-use|sora|omni-)",
         re.IGNORECASE,
     ),
-    "kimi": re.compile(r"^moonshot-v1|vision"),
 }
 
 
@@ -481,6 +481,7 @@ def discover_provider_models(
     *,
     timeout: float = 4.0,
     force: bool = False,
+    cached_only: bool = False,
 ) -> list[str]:
     """Return live model ids for ``provider`` (cached), or [] when unavailable.
 
@@ -489,25 +490,32 @@ def discover_provider_models(
     """
     if provider == "codex":
         return [m["id"] for m in codex_cache_models()]
-    endpoint = _models_endpoint(provider)
-    if not endpoint or provider not in REMOTE_PROVIDERS:
+    endpoint = _models_endpoint(provider, config)
+    if not endpoint:
         return []
+    key = _discovery_key(config, provider)
+    cache_key = (provider, endpoint, hashlib.sha256(key.encode()).hexdigest())
     now = time.monotonic()
     with _discovery_lock:
-        cached = _discovered_models.get(provider)
-        if cached and not force and now - cached[0] < _DISCOVERY_TTL_SECONDS:
+        cached = _discovered_models.get(cache_key)
+        if cached and (cached_only or (not force and now - cached[0] < _DISCOVERY_TTL_SECONDS)):
             return list(cached[1])
-    key = _discovery_key(config, provider)
-    if not key and REMOTE_PROVIDERS[provider].get("requires_api_key", True):
+    if cached_only:
+        return []
+    if not key and REMOTE_PROVIDERS.get(provider, {}).get("requires_api_key", provider != "custom"):
         return []
     ids: list[str] = []
     exclude = _DISCOVERY_EXCLUDE.get(provider)
     try:
-        req = urllib.request.Request(endpoint, headers=_discovery_headers(provider, key))
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8", errors="replace"))
-        rows = data.get("data") if isinstance(data, dict) else data
-        if isinstance(rows, list):
+        page_url = endpoint
+        cursors = set()
+        while page_url:
+            req = urllib.request.Request(page_url, headers=_discovery_headers(provider, key))
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8", errors="replace"))
+            rows = data.get("data") if isinstance(data, dict) else data
+            if not isinstance(rows, list):
+                raise ValueError("Invalid model list")
             for row in rows:
                 model_id = row.get("id") if isinstance(row, dict) else None
                 if not isinstance(model_id, str) or not model_id.strip():
@@ -515,13 +523,19 @@ def discover_provider_models(
                 model_id = model_id.strip()
                 if exclude is not None and exclude.search(model_id):
                     continue
-                ids.append(model_id)
+                if model_id not in ids:
+                    ids.append(model_id)
+            cursor = data.get("last_id") if isinstance(data, dict) and data.get("has_more") else None
+            if not cursor or cursor in cursors:
+                break
+            cursors.add(cursor)
+            page_url = endpoint + ("&" if "?" in endpoint else "?") + urllib.parse.urlencode({"after_id": cursor})
     except Exception:
         ids = []
     with _discovery_lock:
         # Cache failures too (briefly) so a dead endpoint is not re-hit on
         # every catalog build; a later force refresh will retry.
-        _discovered_models[provider] = (now, ids)
+        _discovered_models[cache_key] = (now, ids)
     return list(ids)
 
 
@@ -555,12 +569,12 @@ def _synthesized_model(provider: str, model_id: str) -> dict:
     return entry
 
 
-def provider_models(provider: str, config: "TetherConfig | None" = None) -> list[dict]:
-    """Catalog models for ``provider``, with live-discovered ids merged in.
+def provider_models(provider: str, config: "TetherConfig | None" = None, *,
+                    force: bool = False, cached_only: bool = False) -> list[dict]:
+    """Provider-reported models, with static metadata and an offline fallback.
 
-    Discovered ids the catalog does not list are placed first (they are
-    almost always the newest releases). Pass ``config`` to enable discovery;
-    without it this is the static catalog.
+    Completion uses cached_only so typing never makes a network request.
+    Do not append retired or inaccessible presets to a successful live list.
     """
     preset = REMOTE_PROVIDERS.get(provider, {})
     known = copy.deepcopy(preset.get("models", []))
@@ -569,21 +583,46 @@ def provider_models(provider: str, config: "TetherConfig | None" = None) -> list
     if provider == "codex":
         live = codex_cache_models()
         if live:
-            live_ids = {m["id"] for m in live}
-            # Codex's own priority order is the intended order; keep static
-            # entries the CLI no longer lists at the end for continuity.
-            return live + [m for m in known if m.get("id") not in live_ids]
-    known_ids = {m.get("id") for m in known}
-    extra = [
-        _synthesized_model(provider, model_id)
-        for model_id in discover_provider_models(config, provider)
-        if model_id not in known_ids
-    ]
-    merged = extra + known
+            return live
+    live_ids = discover_provider_models(config, provider, force=force, cached_only=cached_only)
+    by_id = {m["id"]: m for m in known}
+    merged = [dict(by_id.get(model_id) or _synthesized_model(provider, model_id), discovered=True)
+              for model_id in live_ids] if live_ids else known
     # Newest first across catalog and discovered ids alike (stable, so the
     # curated catalog order breaks ties).
     merged.sort(key=lambda m: _version_sort_key(str(m.get("id", ""))), reverse=True)
     return merged
+
+
+def default_provider_model(provider: str) -> str:
+    """Use Codex's current priority order instead of freezing an old default."""
+    if provider == "codex":
+        models = codex_cache_models()
+        if models:
+            return models[0]["id"]
+    return str(REMOTE_PROVIDERS.get(provider, {}).get("api_model", ""))
+
+
+def reasoning_setting(config: "TetherConfig") -> tuple[str, list[str], str]:
+    """Return the supported parameter, choices, and current value without I/O
+    to a provider. Codex metadata still follows updates to its local catalog.
+    """
+    if not config.is_remote:
+        return "", [], "default"
+    models = provider_models(config.provider, config, cached_only=True)
+    model = next((m for m in models if m["id"] == config.api_model), None)
+    # A saved model can be absent from discovery but still have known metadata.
+    model = model or provider_model(config.provider, config.api_model) or {}
+    choices = list(model.get("reasoning_efforts", []))
+    if choices:
+        current = config.reasoning_effort
+        if not current and config.thinking_mode == "disabled" and "off" in choices:
+            current = "off"
+        return "reasoning_effort", choices, current or "default"
+    choices = list(model.get("thinking_modes", []))
+    if choices:
+        return "thinking_mode", choices, config.thinking_mode or "default"
+    return "", [], config.reasoning_effort or config.thinking_mode or "default"
 
 
 def _version_sort_key(model_id: str) -> tuple:
@@ -674,7 +713,7 @@ def apply_provider_selection(
     preset = REMOTE_PROVIDERS.get(provider)
     if preset is None:
         raise ValueError(f"Unknown provider: {provider}")
-    selected_id = model_id.strip() or str(preset["api_model"])
+    selected_id = model_id.strip() or default_provider_model(provider)
     model = provider_model(provider, selected_id, config)
     if model is None:
         raise ValueError(f"Unknown {provider} model: {selected_id}")
@@ -741,6 +780,15 @@ class TetherConfig:
     compact_after_turns: int = 20
     temperature: float = 0.7
     top_p: float = 0.9
+
+    # New shell panes only; inherit preserves the user's existing login shell.
+    terminal_shell: str = ""
+    terminal_theme: str = "inherit"
+    terminal_font_mode: str = "ascii"
+    terminal_theme_file: str = ""
+
+    # Opt-in, metadata-only Python runtime baseline tracing.
+    runtime_trace_dir: str = ""
 
     # self-learning — when on, completed multi-step submissions are recorded
     # and recurring (similar prompt + similar tool sequence) workflows are

@@ -4,6 +4,7 @@ from __future__ import annotations
 import concurrent.futures
 from dataclasses import dataclass, field
 import itertools
+from pathlib import Path
 import re
 import sys
 import threading
@@ -111,8 +112,11 @@ class _AgentActivityState:
     label: str
     task: str
     agent_type: str
+    provider: str = "local"
+    model: str = ""
     revision: int = 0
     status: str = "queued"
+    phase: str = "idle"
     activity: str = "Waiting for a worker slot"
     tool_calls: list[dict] = field(default_factory=list)
     output: str = ""
@@ -340,6 +344,9 @@ class AgentTool(BaseTool):
             label=label,
             task=task,
             agent_type=agent_type,
+            provider=self._config.provider if self._config.is_remote else "local",
+            model=(self._config.api_model if self._config.is_remote
+                   else Path(self._config.model_path).stem),
         )
 
     def _run_single(self, definition, state: _AgentActivityState, cancel_event=None) -> AgentResult:
@@ -355,7 +362,15 @@ class AgentTool(BaseTool):
             self._record_tool_event(state, event, tokens=tokens)
 
         def on_status(label: str, status: str, detail: str) -> None:
+            self._update_agent(state, phase="thinking" if status == "thinking" else "working")
             self._on_status(label, status, detail)
+
+        def request_approval(name: str, arguments: dict) -> bool | str:
+            self._update_agent(state, phase="waiting", activity=f"Waiting for approval: {name}")
+            try:
+                return self._request_child_approval(name, arguments, cancel_event)
+            finally:
+                self._update_agent(state, phase="working", activity="Working on the assigned task")
 
         try:
             agent = SubAgent(
@@ -368,15 +383,7 @@ class AgentTool(BaseTool):
                 on_tool_call=self._on_tool_call,
                 on_tool_event=on_tool_event,
                 on_status=on_status,
-                on_approval_request=(
-                    (
-                        lambda name, args: self._request_child_approval(
-                            name, args, cancel_event
-                        )
-                    )
-                    if self._on_approval_request is not None
-                    else None
-                ),
+                on_approval_request=request_approval if self._on_approval_request is not None else None,
                 cancel_event=cancel_event,
             )
             result = agent.run(state.task)
@@ -414,6 +421,7 @@ class AgentTool(BaseTool):
         self._update_agent(
             state,
             status=status,
+            phase="idle",
             activity=activity,
             output=callback_output,
             tokens=result.usage.total,
@@ -512,6 +520,7 @@ class AgentTool(BaseTool):
                     "error_code": _clip_safe_text(event.error_code, 80),
                 })
             state.tokens = tokens
+            state.phase = "working"
             state.elapsed_seconds = (
                 time.monotonic() - state.started_at if state.started_at is not None else 0.0
             )
@@ -533,7 +542,10 @@ class AgentTool(BaseTool):
             "label": state.label,
             "task": _clip_safe_text(state.task, 2_000),
             "agent_type": state.agent_type,
+            "provider": state.provider,
+            "model": state.model,
             "status": state.status,
+            "phase": state.phase,
             "activity": state.activity,
             "tool_calls": [dict(item) for item in state.tool_calls],
             "output": _clip_safe_text(state.output, 12_000),

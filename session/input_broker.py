@@ -44,7 +44,7 @@ class InputBroker:
     # -- main-loop side ----------------------------------------------------
     def has_pending(self) -> bool:
         with self._lock:
-            return self._pending
+            return self._pending and not self._event.is_set()
 
     def hint(self) -> str:
         with self._lock:
@@ -54,7 +54,7 @@ class InputBroker:
         """Deliver a typed line to the waiting worker. Returns False if nothing
         was waiting."""
         with self._lock:
-            if not self._pending:
+            if not self._pending or self._event.is_set():
                 return False
             self._response = line
             self._event.set()
@@ -63,7 +63,7 @@ class InputBroker:
     def cancel(self) -> bool:
         """Unblock a waiting worker with a cancellation (request_line -> None)."""
         with self._lock:
-            if not self._pending:
+            if not self._pending or self._event.is_set():
                 return False
             self._response = self._CANCEL
             self._event.set()

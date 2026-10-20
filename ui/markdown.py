@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 import shutil
+import sys
 
 from .colors import BOLD, BLUE, CYAN, RESET, COLOR_ENABLED
 
@@ -27,6 +28,9 @@ _INLINE = re.compile(
 
 
 def term_width(default: int = 80) -> int:
+    pane_width = getattr(sys.stdout, "terminal_width", None)
+    if callable(pane_width):
+        return max(20, pane_width())
     try:
         return shutil.get_terminal_size((default, 24)).columns
     except OSError:
