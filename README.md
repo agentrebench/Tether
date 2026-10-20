@@ -116,6 +116,10 @@ model-independent project knowledge is the part that is hard to copy.
 macOS terminal application
 --------------------------
 
+**[Download Tether 0.4.0 for macOS](https://github.com/agentrebench/Tether/releases/download/v0.4.0/Tether-0.4.0.dmg)**
+— Apple Silicon, macOS 26+. This build is ad-hoc signed and not Apple-notarized.
+[Release notes and SHA-256 checksum](https://github.com/agentrebench/Tether/releases/tag/v0.4.0).
+
 Tether now has a standalone macOS terminal app under `native/`. It opens a
 normal login shell, with tabs, split panes, clickable zsh-theme settings,
 live theme previews, a bundled Nerd Font, and btop included. Agents are optional;
