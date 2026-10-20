@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# Build Tether.app, sign it, notarize it, and wrap it in a stapled DMG.
+# Build the native Tether.app and package a verified DMG. --legacy selects Tauri.
+# --adhoc skips signing-identity discovery and notarization for a local build.
+# --fetch permits the native builder to download missing pinned assets.
+# TETHER_BUILD_PYTHON selects Python; defaults to the repo venv, then python3.
 #
 # Signing / notarization inputs (all optional — without them you get the
 # previous ad-hoc, local-testing-only build):
@@ -22,14 +25,39 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DESKTOP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$DESKTOP_DIR/.." && pwd)"
-SOURCE_APP="$DESKTOP_DIR/src-tauri/target/release/bundle/macos/Tether.app"
 ENTITLEMENTS="$DESKTOP_DIR/src-tauri/entitlements.plist"
 OUTPUT_DIR="$REPO_ROOT/dist/macos"
-STAGING_DIR="$OUTPUT_DIR/.tether-dmg-staging"
 NOTARY_PROFILE="${TETHER_NOTARY_PROFILE:-tether-notary}"
+TARGET=native
+ADHOC=0
+FETCH=0
+WORK_DIR=""
+MOUNTED=0
+for arg in "$@"; do
+    case "$arg" in
+        --legacy) TARGET=legacy ;;
+        --adhoc) ADHOC=1 ;;
+        --fetch) FETCH=1 ;;
+        --help|-h)
+            echo "Usage: $0 [--legacy] [--adhoc] [--fetch]"
+            echo "Build the native terminal DMG; --legacy builds the Tauri desktop instead."
+            exit 0 ;;
+        *) echo "Unknown option: $arg" >&2; exit 2 ;;
+    esac
+done
+if [[ "$TARGET" == legacy && "$FETCH" == 1 ]]; then
+    echo "--fetch is only supported for the native app." >&2
+    exit 2
+fi
 
 cleanup() {
-    rm -rf "$STAGING_DIR"
+    if [[ "$MOUNTED" == 1 ]]; then
+        if ! hdiutil detach "$MOUNT_DIR"; then
+            echo "Could not detach $MOUNT_DIR; preserving $WORK_DIR for cleanup." >&2
+            return
+        fi
+    fi
+    if [[ -n "$WORK_DIR" ]]; then rm -rf "$WORK_DIR"; fi
 }
 trap cleanup EXIT
 
@@ -40,7 +68,10 @@ warn() { printf '\033[33mwarning:\033[0m %s\n' "$*" >&2; }
 # Resolve the signing identity.
 # ---------------------------------------------------------------------------
 IDENTITY="${APPLE_SIGNING_IDENTITY:-}"
-if [[ -z "$IDENTITY" ]]; then
+if [[ "$ADHOC" == 1 ]]; then
+    IDENTITY=""
+    unset APPLE_SIGNING_IDENTITY
+elif [[ -z "$IDENTITY" ]]; then
     # First "Developer ID Application" certificate in the keychain, if any.
     IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null \
         | sed -nE 's/^ *[0-9]+\) [0-9A-F]+ "(Developer ID Application: [^"]+)"$/\1/p' \
@@ -49,8 +80,7 @@ fi
 
 NOTARIZE=1
 if [[ -z "$IDENTITY" ]]; then
-    warn "No Developer ID Application identity found; producing an AD-HOC signed build."
-    warn "This DMG is for local testing only and will be blocked by Gatekeeper elsewhere."
+    warn "Producing an ad-hoc signed local build; it is not notarized for distribution."
     NOTARIZE=0
 elif [[ "${TETHER_SKIP_NOTARIZE:-0}" == "1" ]]; then
     warn "TETHER_SKIP_NOTARIZE=1: signing with '$IDENTITY' but skipping notarization."
@@ -69,18 +99,37 @@ fi
 # ---------------------------------------------------------------------------
 # Build the app bundle.
 # ---------------------------------------------------------------------------
-cd "$DESKTOP_DIR"
-VERSION="$(node -p "require('./package.json').version")"
-OUTPUT_DMG="$OUTPUT_DIR/Tether-$VERSION.dmg"
-
-log "Building Tether.app $VERSION"
+log "Building Tether.app ($TARGET)"
 if [[ -n "$IDENTITY" ]]; then
     # Let the Tauri bundler sign with the real identity (hardened runtime on
     # by default). We re-sign below anyway so the result is deterministic
     # regardless of bundler version.
     export APPLE_SIGNING_IDENTITY="$IDENTITY"
 fi
-npm run desktop:build:macos
+if [[ "$TARGET" == native ]]; then
+    SOURCE_APP="$OUTPUT_DIR/Tether.app"
+    PYTHON_BIN="${TETHER_BUILD_PYTHON:-$REPO_ROOT/.venv/bin/python}"
+    if [[ -z "${TETHER_BUILD_PYTHON:-}" && ! -x "$PYTHON_BIN" ]]; then PYTHON_BIN=python3; fi
+    if [[ "$FETCH" == 1 ]]; then
+        "$PYTHON_BIN" "$REPO_ROOT/scripts/build_macos_app.py" --fetch
+    else
+        "$PYTHON_BIN" "$REPO_ROOT/scripts/build_macos_app.py"
+    fi
+else
+    SOURCE_APP="$DESKTOP_DIR/src-tauri/target/release/bundle/macos/Tether.app"
+    (cd "$DESKTOP_DIR" && npm run desktop:build:macos)
+fi
+VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$SOURCE_APP/Contents/Info.plist")"
+if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "Invalid app version for DMG filename: $VERSION" >&2
+    exit 1
+fi
+OUTPUT_DMG="$OUTPUT_DIR/Tether-$VERSION.dmg"
+mkdir -p "$OUTPUT_DIR"
+WORK_DIR="$(mktemp -d "$OUTPUT_DIR/.tether-dmg.XXXXXX")"
+STAGING_DIR="$WORK_DIR/staging"
+MOUNT_DIR="$WORK_DIR/mounted"
+BUILD_DMG="$WORK_DIR/Tether-$VERSION.dmg"
 
 # ---------------------------------------------------------------------------
 # Sign.
@@ -125,10 +174,8 @@ notarize_path() {
     echo "notarization accepted (submission $id)"
 }
 
-mkdir -p "$OUTPUT_DIR"
 if [[ "$NOTARIZE" == "1" ]]; then
-    APP_ZIP="$OUTPUT_DIR/.Tether-$VERSION-notarize.zip"
-    rm -f "$APP_ZIP"
+    APP_ZIP="$WORK_DIR/Tether-$VERSION-notarize.zip"
     ditto -c -k --keepParent "$SOURCE_APP" "$APP_ZIP"
     notarize_path "$APP_ZIP"
     rm -f "$APP_ZIP"
@@ -139,8 +186,6 @@ fi
 # Package the DMG.
 # ---------------------------------------------------------------------------
 log "Packaging DMG"
-find "$OUTPUT_DIR" -maxdepth 1 -type f -name 'Tether-*.dmg' ! -name "Tether-$VERSION.dmg" -delete
-rm -rf "$STAGING_DIR"
 mkdir -p "$STAGING_DIR"
 ditto "$SOURCE_APP" "$STAGING_DIR/Tether.app"
 ln -s /Applications "$STAGING_DIR/Applications"
@@ -150,23 +195,47 @@ hdiutil create \
     -srcfolder "$STAGING_DIR" \
     -ov \
     -format UDZO \
-    "$OUTPUT_DMG"
+    "$BUILD_DMG"
 
 if [[ -n "$IDENTITY" ]]; then
-    codesign --force --timestamp --sign "$IDENTITY" "$OUTPUT_DMG"
-    codesign --verify --verbose=2 "$OUTPUT_DMG"
+    codesign --force --timestamp --sign "$IDENTITY" "$BUILD_DMG"
+    codesign --verify --verbose=2 "$BUILD_DMG"
 fi
 
 if [[ "$NOTARIZE" == "1" ]]; then
-    notarize_path "$OUTPUT_DMG"
-    xcrun stapler staple "$OUTPUT_DMG"
+    notarize_path "$BUILD_DMG"
+    xcrun stapler staple "$BUILD_DMG"
     log "Gatekeeper assessment"
-    spctl --assess --type open --context context:primary-signature --verbose=2 "$OUTPUT_DMG"
+    spctl --assess --type open --context context:primary-signature --verbose=2 "$BUILD_DMG"
     spctl --assess --type execute --verbose=2 "$SOURCE_APP"
 fi
 
+log "Verifying disk image and packaged app"
+hdiutil verify "$BUILD_DMG"
+mkdir -p "$MOUNT_DIR"
+hdiutil attach -readonly -nobrowse -mountpoint "$MOUNT_DIR" "$BUILD_DMG"
+MOUNTED=1
+PACKAGED_APP="$MOUNT_DIR/Tether.app"
+codesign --verify --deep --strict --verbose=2 "$PACKAGED_APP"
+test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$PACKAGED_APP/Contents/Info.plist")" = "$VERSION"
+test "$(readlink "$MOUNT_DIR/Applications")" = /Applications
+EXECUTABLE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$PACKAGED_APP/Contents/Info.plist")"
+cmp "$SOURCE_APP/Contents/MacOS/$EXECUTABLE" "$PACKAGED_APP/Contents/MacOS/$EXECUTABLE"
+if [[ "$TARGET" == native ]]; then
+    for helper in tether btop; do
+        cmp "$SOURCE_APP/Contents/Resources/bin/$helper" "$PACKAGED_APP/Contents/Resources/bin/$helper"
+        TETHER_CONFIG_DIR="$WORK_DIR/config" "$PACKAGED_APP/Contents/Resources/bin/$helper" --version
+    done
+fi
+hdiutil detach "$MOUNT_DIR"
+MOUNTED=0
+(cd "$WORK_DIR" && shasum -a 256 "Tether-$VERSION.dmg" > "Tether-$VERSION.dmg.sha256")
+mv -f "$BUILD_DMG" "$OUTPUT_DMG"
+mv -f "$WORK_DIR/Tether-$VERSION.dmg.sha256" "$OUTPUT_DMG.sha256"
+
 log "Done"
 echo "$OUTPUT_DMG"
+echo "$OUTPUT_DMG.sha256"
 if [[ "$NOTARIZE" != "1" ]]; then
     echo "(not notarized)"
 fi

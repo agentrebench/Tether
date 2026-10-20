@@ -125,6 +125,8 @@ The agent engine and project knowledge remain in Python. C23 owns terminal
 processes and the light game, with a small Cocoa/WebKit display adapter.
 Build with `python scripts/build_macos_app.py --fetch`, then open
 `dist/macos/Tether.app`. The current package targets Apple Silicon macOS 26+.
+Create a local installer with `bash desktop/scripts/package_macos.sh --adhoc`;
+the native app DMG and its SHA-256 checksum are written to `dist/macos/`.
 See [native app usage, architecture, and verification](docs/native-macos-app.md).
 
 Terminal workspace
@@ -283,7 +285,7 @@ the same status from the terminal.
 cd desktop
 npm install
 npm run desktop:dev                 # development
-npm run dmg                         # macOS: dist/macos/Tether-VERSION.dmg
+npm run dmg -- --legacy              # macOS: package this Tauri desktop app
 npm run linux                       # Linux (experimental): dist/linux/*.{AppImage,deb,rpm}
 ```
 

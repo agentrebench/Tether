@@ -131,10 +131,11 @@ Build the macOS app and DMG on macOS:
 
 ```bash
 cd desktop
-npm run dmg
+npm run dmg -- --legacy
 ```
 
-The versioned installer is copied to `dist/macos/`.
+The versioned installer is copied to `dist/macos/`. Without `--legacy`, the
+packager builds the [native macOS terminal](native-macos-app.md) instead.
 
 > **Linux is experimental.** The Rust host, frontend, and packages build in CI
 > (`.github/workflows/desktop-linux.yml`), and the code paths are POSIX/`bwrap`
@@ -195,7 +196,7 @@ native package. Environment variables take precedence over stored keys.
 
 ### Signing and notarizing the macOS build
 
-`npm run dmg` (`scripts/package_macos.sh`) signs and notarizes automatically
+`npm run dmg -- --legacy` (`scripts/package_macos.sh`) signs and notarizes automatically
 when the machine has the material; without it, it falls back to the previous
 ad-hoc, local-testing-only build and says so.
 
@@ -215,7 +216,7 @@ One-time setup on the release Mac:
      --key ~/.private_keys/AuthKey_KEYID.p8 --key-id KEYID --issuer ISSUER-UUID
    ```
 
-Then `npm run dmg`. The script auto-detects the first Developer ID identity
+Then `npm run dmg -- --legacy`. The script auto-detects the first Developer ID identity
 (override with `APPLE_SIGNING_IDENTITY`), signs the app with the hardened
 runtime and `src-tauri/entitlements.plist`, notarizes and staples the `.app`,
 builds the DMG, signs it, notarizes and staples the DMG, and finishes with a

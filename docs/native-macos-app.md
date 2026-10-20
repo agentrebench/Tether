@@ -84,6 +84,37 @@ The bundle is locally ad-hoc signed and verified. Distribution to other Macs
 still requires the usual Developer ID signing/notarization workflow; this
 build script does not publish or release anything.
 
+### Disk image installer
+
+From the repository root, build a fresh app and local installer with:
+
+```sh
+bash desktop/scripts/package_macos.sh --adhoc
+```
+
+The equivalent command from `desktop/` is `npm run dmg -- --adhoc`. Native
+terminal packaging is the default; `--legacy` explicitly selects the older
+Tauri desktop app. `--fetch` allows missing pinned native assets to download.
+The packager uses `.venv/bin/python`, falling back to `python3`; set
+`TETHER_BUILD_PYTHON` to choose another build environment.
+
+The version comes from the built app's Info.plist. For version 0.4.0 the outputs
+are `dist/macos/Tether-0.4.0.dmg` and `Tether-0.4.0.dmg.sha256`. Open the DMG and
+drag **Tether** onto **Applications**. It contains the bundled Python engine,
+btop, terminal renderer, font, and licenses. Apple Silicon macOS 26+ is required.
+
+Packaging verifies the image, mounts it read-only, checks the app's signature
+and version, compares its executables with the build, and runs both bundled
+helpers before replacing the output DMG. Earlier versions remain available.
+Verify the downloaded image from its directory with
+`shasum -a 256 -c Tether-0.4.0.dmg.sha256`.
+
+`--adhoc` creates a local build without accessing signing credentials or sending
+anything to Apple's notarization service. Omit it to use the existing Developer
+ID signing/notarization flow when configured. An ad-hoc build is not notarized
+for distribution to other Macs. Packaging does not upload a GitHub release or
+replace the installed application.
+
 ```sh
 python -m pytest -q
 cmake -S native -B build/native/sanitize -DCMAKE_BUILD_TYPE=Debug \
