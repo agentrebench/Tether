@@ -50,6 +50,29 @@ class CodexBackendSafetyTests(unittest.TestCase):
         self.assertIn("Explain this function.", prompt)
         self.assertNotIn("Marq", prompt)
 
+    def test_context_override_reaches_codex_command(self):
+        for size in (1_000_000, 123456):
+            backend = CodexExecBackend(TetherConfig(provider="codex", context_size=size))
+            _, command, _, _ = backend._build_exec_cmd("codex", json_mode=True)
+            self.assertIn(f"model_context_window={size}", command)
+
+    def test_long_messages_and_history_are_not_silently_cut_at_old_caps(self):
+        content = "BEGIN " + "x" * 50000 + " MIDDLE " + "y" * 70000 + " END"
+        with patch.dict(os.environ, {}, clear=True):
+            prompt = CodexExecBackend._build_prompt([Message(role="user", content=content)])
+        self.assertIn(content, prompt)
+        self.assertNotIn("truncated", prompt)
+
+    def test_serialized_prompt_remains_bounded_by_context_and_explicit_cap(self):
+        messages = [Message(role="user", content="x" * 100000 + "LATEST")]
+        for cap, expected in (("5000", 5000), ("999999", 40000)):
+            with patch.dict(os.environ, {"TETHER_CODEX_PROMPT_CHARS": cap}):
+                prompt = CodexExecBackend._build_prompt(messages, context_size=10000)
+            self.assertLessEqual(len(prompt), expected)
+            self.assertIn("outer Tether engine owns tools", prompt)
+            self.assertIn("Earlier conversation truncated", prompt)
+            self.assertTrue(prompt.endswith("LATEST"))
+
 
 if __name__ == "__main__":
     unittest.main()

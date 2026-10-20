@@ -2202,13 +2202,12 @@ class TetherREPL:
 
     def _print_welcome(self, time_greeting: str) -> None:
         cwd = self._home_abbrev(os.getcwd())
-        ctx_k = self.config.context_size // 1024
         if self.config.is_remote:
             model = self.config.api_model or self.config.provider
         else:
             model = Path(self.config.model_path).stem if self.config.model_path else "local model"
 
-        print(f"  {CYAN}{model}{RESET}{DIM} · {ctx_k}K context · {cwd}{RESET}")
+        print(f"  {CYAN}{model}{RESET}{DIM} · {self.config.context_size:,} context · {cwd}{RESET}")
         print()
         print(f"  {GREEN}{BOLD}{time_greeting}.{RESET} {random.choice(GREETINGS)}")
         print(f"  {dim('/help commands · /plan plan first · /resume continue a past chat')}")

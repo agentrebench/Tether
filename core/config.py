@@ -18,6 +18,9 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8080
 DEFAULT_MODEL_PATH = ""
 DEFAULT_CONTEXT_SIZE = 131072
+# Tether's default remote context budget, independent of cached provider
+# metadata. Local GGUF allocation continues to follow model/GPU tuning.
+DEFAULT_REMOTE_CONTEXT_SIZE = 1_000_000
 DEFAULT_GPU_LAYERS = -1  # offload all
 DEFAULT_GPU_MEMORY_UTIL = 0.60
 DEFAULT_PARALLEL_SLOTS = 4
@@ -48,12 +51,12 @@ REMOTE_PROVIDERS = {
         "api_base_url": "",
         "api_model": "gpt-5.6-sol",
         "api_key_env": "",
-        "context_size": 272_000,
+        "context_size": DEFAULT_REMOTE_CONTEXT_SIZE,
         "max_budget_tokens": 100_000_000,
         "omit_sampling": True,
         "requires_api_key": False,
-        # Static fallback only: the live list (ids, reasoning levels, defaults,
-        # context) is read from the Codex CLI's own ~/.codex/models_cache.json
+        # Static fallback only: the live list (ids, reasoning levels, defaults)
+        # is read from the Codex CLI's own ~/.codex/models_cache.json
         # by discover_provider_models("codex"), so new Codex models appear
         # without a Tether update.
         "models": [
@@ -61,7 +64,7 @@ REMOTE_PROVIDERS = {
                 "id": "gpt-5.6-sol",
                 "label": "GPT-5.6-Sol",
                 "description": "Codex default; fastest 5.6",
-                "context_size": 272_000,
+                "context_size": DEFAULT_REMOTE_CONTEXT_SIZE,
                 "reasoning_efforts": ["low", "medium", "high", "xhigh", "max", "ultra"],
                 "default_reasoning_effort": "low",
                 "max_reasoning_effort": "ultra",
@@ -70,7 +73,7 @@ REMOTE_PROVIDERS = {
                 "id": "gpt-5.6-terra",
                 "label": "GPT-5.6-Terra",
                 "description": "Balanced 5.6",
-                "context_size": 272_000,
+                "context_size": DEFAULT_REMOTE_CONTEXT_SIZE,
                 "reasoning_efforts": ["low", "medium", "high", "xhigh", "max", "ultra"],
                 "default_reasoning_effort": "medium",
                 "max_reasoning_effort": "ultra",
@@ -79,7 +82,7 @@ REMOTE_PROVIDERS = {
                 "id": "gpt-5.6-luna",
                 "label": "GPT-5.6-Luna",
                 "description": "Deepest 5.6",
-                "context_size": 272_000,
+                "context_size": DEFAULT_REMOTE_CONTEXT_SIZE,
                 "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"],
                 "default_reasoning_effort": "medium",
                 "max_reasoning_effort": "max",
@@ -88,7 +91,7 @@ REMOTE_PROVIDERS = {
                 "id": "gpt-5.5",
                 "label": "GPT-5.5",
                 "description": "Previous Codex default",
-                "context_size": 272_000,
+                "context_size": DEFAULT_REMOTE_CONTEXT_SIZE,
                 "reasoning_efforts": ["low", "medium", "high", "xhigh"],
                 "default_reasoning_effort": "medium",
                 "max_reasoning_effort": "xhigh",
@@ -97,7 +100,7 @@ REMOTE_PROVIDERS = {
                 "id": "gpt-5.4",
                 "label": "GPT-5.4",
                 "description": "Older general-purpose model",
-                "context_size": 272_000,
+                "context_size": DEFAULT_REMOTE_CONTEXT_SIZE,
                 "reasoning_efforts": ["low", "medium", "high", "xhigh"],
                 "default_reasoning_effort": "medium",
                 "max_reasoning_effort": "xhigh",
@@ -114,7 +117,7 @@ REMOTE_PROVIDERS = {
         # model to reasoning-off for low latency; users can select high/max or
         # the Pro model from either interface when a task needs more depth.
         "reasoning_effort": "off",
-        "context_size": 1_000_000,
+        "context_size": DEFAULT_REMOTE_CONTEXT_SIZE,
         # max_budget_tokens is a cumulative cost guard, not a context limit.
         # Each turn re-counts the full prompt (history + replayed reasoning),
         # so it grows roughly quadratically with turn count. 100M is a sanity
@@ -126,7 +129,7 @@ REMOTE_PROVIDERS = {
                 "id": "deepseek-v4-flash",
                 "label": "DeepSeek V4 Flash",
                 "description": "Faster responses for everyday coding",
-                "context_size": 1_000_000,
+                "context_size": DEFAULT_REMOTE_CONTEXT_SIZE,
                 "reasoning_efforts": ["off", "high", "max"],
                 "default_reasoning_effort": "off",
                 "max_reasoning_effort": "max",
@@ -135,7 +138,7 @@ REMOTE_PROVIDERS = {
                 "id": "deepseek-v4-pro",
                 "label": "DeepSeek V4 Pro",
                 "description": "Deeper reasoning; usually slower",
-                "context_size": 1_000_000,
+                "context_size": DEFAULT_REMOTE_CONTEXT_SIZE,
                 "reasoning_efforts": ["off", "high", "max"],
                 "default_reasoning_effort": "high",
                 "max_reasoning_effort": "max",
@@ -149,7 +152,7 @@ REMOTE_PROVIDERS = {
         "api_model": "kimi-k3",
         "api_key_env": "KIMI_API_KEY",
         "api_key_env_aliases": ["MOONSHOT_API_KEY"],
-        "context_size": 262_144,
+        "context_size": DEFAULT_REMOTE_CONTEXT_SIZE,
         "max_budget_tokens": 100_000_000,
         "max_tokens_field": "max_completion_tokens",
         "omit_sampling": False,
@@ -159,7 +162,7 @@ REMOTE_PROVIDERS = {
                 "id": "kimi-k3",
                 "label": "Kimi K3",
                 "description": "Newest Kimi model; always reasons",
-                "context_size": 262_144,
+                "context_size": DEFAULT_REMOTE_CONTEXT_SIZE,
                 "reasoning_efforts": ["low", "high", "max"],
                 "default_reasoning_effort": "low",
                 "max_reasoning_effort": "max",
@@ -169,14 +172,14 @@ REMOTE_PROVIDERS = {
                 "id": "kimi-k2.7-code",
                 "label": "Kimi K2.7 Code",
                 "description": "Coding model with preserved thinking",
-                "context_size": 262_144,
+                "context_size": DEFAULT_REMOTE_CONTEXT_SIZE,
                 "thinking_mode": "enabled",
             },
             {
                 "id": "kimi-k2.6",
                 "label": "Kimi K2.6",
                 "description": "General model with optional thinking",
-                "context_size": 262_144,
+                "context_size": DEFAULT_REMOTE_CONTEXT_SIZE,
                 "thinking_modes": ["enabled", "disabled"],
                 "default_thinking_mode": "enabled",
             },
@@ -193,7 +196,7 @@ REMOTE_PROVIDERS = {
         # adding Responses-API support to engine/backend.py.
         "api_model": "gpt-5.6-sol",
         "api_key_env": "OPENAI_API_KEY",
-        "context_size": 400_000,
+        "context_size": DEFAULT_REMOTE_CONTEXT_SIZE,
         "max_budget_tokens": 100_000_000,
         # gpt-5.x and o-series reject `max_tokens` and require this instead.
         "max_tokens_field": "max_completion_tokens",
@@ -205,7 +208,7 @@ REMOTE_PROVIDERS = {
                 "id": "gpt-5.6-sol",
                 "label": "GPT-5.6-Sol",
                 "description": "Newest GPT; fastest of the 5.6 family",
-                "context_size": 400_000,
+                "context_size": DEFAULT_REMOTE_CONTEXT_SIZE,
                 "reasoning_efforts": ["none", "low", "medium", "high", "xhigh", "max"],
                 "default_reasoning_effort": "low",
                 "max_reasoning_effort": "max",
@@ -214,7 +217,7 @@ REMOTE_PROVIDERS = {
                 "id": "gpt-5.6-terra",
                 "label": "GPT-5.6-Terra",
                 "description": "Balanced 5.6 model",
-                "context_size": 400_000,
+                "context_size": DEFAULT_REMOTE_CONTEXT_SIZE,
                 "reasoning_efforts": ["none", "low", "medium", "high", "xhigh", "max"],
                 "default_reasoning_effort": "medium",
                 "max_reasoning_effort": "max",
@@ -223,7 +226,7 @@ REMOTE_PROVIDERS = {
                 "id": "gpt-5.6-luna",
                 "label": "GPT-5.6-Luna",
                 "description": "Deepest-reasoning 5.6 model",
-                "context_size": 400_000,
+                "context_size": DEFAULT_REMOTE_CONTEXT_SIZE,
                 "reasoning_efforts": ["none", "low", "medium", "high", "xhigh", "max"],
                 "default_reasoning_effort": "medium",
                 "max_reasoning_effort": "max",
@@ -232,7 +235,7 @@ REMOTE_PROVIDERS = {
                 "id": "gpt-5.5",
                 "label": "GPT-5.5",
                 "description": "Previous flagship GPT model",
-                "context_size": 400_000,
+                "context_size": DEFAULT_REMOTE_CONTEXT_SIZE,
                 "reasoning_efforts": ["none", "low", "medium", "high", "xhigh"],
                 "default_reasoning_effort": "medium",
                 "max_reasoning_effort": "xhigh",
@@ -241,7 +244,7 @@ REMOTE_PROVIDERS = {
                 "id": "gpt-5.4",
                 "label": "GPT-5.4",
                 "description": "Strong general-purpose model",
-                "context_size": 1_050_000,
+                "context_size": DEFAULT_REMOTE_CONTEXT_SIZE,
                 "reasoning_efforts": ["none", "low", "medium", "high", "xhigh"],
                 "default_reasoning_effort": "none",
                 "max_reasoning_effort": "xhigh",
@@ -250,7 +253,7 @@ REMOTE_PROVIDERS = {
                 "id": "gpt-5.4-mini",
                 "label": "GPT-5.4 mini",
                 "description": "Lower latency and cost",
-                "context_size": 400_000,
+                "context_size": DEFAULT_REMOTE_CONTEXT_SIZE,
                 "reasoning_efforts": ["none", "low", "medium", "high", "xhigh"],
                 "default_reasoning_effort": "none",
                 "max_reasoning_effort": "xhigh",
@@ -259,7 +262,7 @@ REMOTE_PROVIDERS = {
                 "id": "gpt-5.4-nano",
                 "label": "GPT-5.4 nano",
                 "description": "Fastest GPT option",
-                "context_size": 400_000,
+                "context_size": DEFAULT_REMOTE_CONTEXT_SIZE,
                 "reasoning_efforts": ["none", "low", "medium", "high", "xhigh"],
                 "default_reasoning_effort": "none",
                 "max_reasoning_effort": "xhigh",
@@ -275,7 +278,7 @@ REMOTE_PROVIDERS = {
         "api_model": "glm-5.2",
         "api_key_env": "ZAI_API_KEY",
         "api_key_env_aliases": ["GLM_API_KEY"],
-        "context_size": 202_752,
+        "context_size": DEFAULT_REMOTE_CONTEXT_SIZE,
         "max_budget_tokens": 100_000_000,
         "requires_api_key": True,
         "models": [
@@ -283,7 +286,7 @@ REMOTE_PROVIDERS = {
                 "id": "glm-5.3",
                 "label": "GLM-5.3",
                 "description": "Newest flagship (may require plan access)",
-                "context_size": 202_752,
+                "context_size": DEFAULT_REMOTE_CONTEXT_SIZE,
                 "thinking_modes": ["enabled", "disabled"],
                 "default_thinking_mode": "enabled",
             },
@@ -291,7 +294,7 @@ REMOTE_PROVIDERS = {
                 "id": "glm-5.2",
                 "label": "GLM-5.2",
                 "description": "Flagship agent model",
-                "context_size": 202_752,
+                "context_size": DEFAULT_REMOTE_CONTEXT_SIZE,
                 "thinking_modes": ["enabled", "disabled"],
                 "default_thinking_mode": "enabled",
             },
@@ -299,7 +302,7 @@ REMOTE_PROVIDERS = {
                 "id": "glm-5.1",
                 "label": "GLM-5.1",
                 "description": "Flagship agent model",
-                "context_size": 202_752,
+                "context_size": DEFAULT_REMOTE_CONTEXT_SIZE,
                 "thinking_modes": ["enabled", "disabled"],
                 "default_thinking_mode": "enabled",
             },
@@ -307,7 +310,7 @@ REMOTE_PROVIDERS = {
                 "id": "glm-5-turbo",
                 "label": "GLM-5 Turbo",
                 "description": "Faster GLM-5 agent model",
-                "context_size": 202_752,
+                "context_size": DEFAULT_REMOTE_CONTEXT_SIZE,
                 "thinking_modes": ["enabled", "disabled"],
                 "default_thinking_mode": "enabled",
             },
@@ -315,7 +318,7 @@ REMOTE_PROVIDERS = {
                 "id": "glm-5",
                 "label": "GLM-5",
                 "description": "Flagship reasoning model",
-                "context_size": 202_752,
+                "context_size": DEFAULT_REMOTE_CONTEXT_SIZE,
                 "thinking_modes": ["enabled", "disabled"],
                 "default_thinking_mode": "enabled",
             },
@@ -323,7 +326,7 @@ REMOTE_PROVIDERS = {
                 "id": "glm-4.7",
                 "label": "GLM-4.7",
                 "description": "Balanced agent model",
-                "context_size": 202_752,
+                "context_size": DEFAULT_REMOTE_CONTEXT_SIZE,
                 "thinking_modes": ["enabled", "disabled"],
                 "default_thinking_mode": "enabled",
             },
@@ -331,7 +334,7 @@ REMOTE_PROVIDERS = {
                 "id": "glm-4.7-flash",
                 "label": "GLM-4.7 Flash",
                 "description": "Fast GLM option",
-                "context_size": 202_752,
+                "context_size": DEFAULT_REMOTE_CONTEXT_SIZE,
                 "thinking_modes": ["enabled", "disabled"],
                 "default_thinking_mode": "disabled",
             },
@@ -344,7 +347,7 @@ REMOTE_PROVIDERS = {
         "models_auth": "anthropic",  # /v1/models wants x-api-key, not Bearer
         "api_model": "claude-opus-5",
         "api_key_env": "ANTHROPIC_API_KEY",
-        "context_size": 1_000_000,
+        "context_size": DEFAULT_REMOTE_CONTEXT_SIZE,
         "max_budget_tokens": 100_000_000,
         "requires_api_key": True,
         "models": [
@@ -352,13 +355,13 @@ REMOTE_PROVIDERS = {
                 "id": "claude-opus-5",
                 "label": "Claude Opus 5",
                 "description": "Most capable Claude model",
-                "context_size": 1_000_000,
+                "context_size": DEFAULT_REMOTE_CONTEXT_SIZE,
             },
             {
                 "id": "claude-sonnet-5",
                 "label": "Claude Sonnet 5",
                 "description": "Balanced Claude model",
-                "context_size": 1_000_000,
+                "context_size": DEFAULT_REMOTE_CONTEXT_SIZE,
             },
         ],
     },
@@ -428,8 +431,8 @@ _codex_models_cache: dict[str, tuple[float, list[dict]]] = {}
 def codex_cache_models() -> list[dict]:
     """Models the installed Codex CLI knows, from its own ``models_cache.json``.
 
-    Full catalog entries (id, label, description, reasoning levels, default,
-    context) ordered by Codex's own priority. Empty when the CLI has never
+    Full catalog entries ordered by Codex's own priority, with Tether's context
+    budget. Empty when the CLI has never
     run or the file is unreadable — callers fall back to the static preset.
     """
     try:
@@ -460,7 +463,7 @@ def codex_cache_models() -> list[dict]:
                 "label": str(row.get("display_name") or slug),
                 "description": " ".join(str(row.get("description") or "").split())[:120]
                 or "Reported by the Codex CLI",
-                "context_size": int(row.get("context_window") or 272_000),
+                "context_size": DEFAULT_REMOTE_CONTEXT_SIZE,
                 "discovered": True,
             }
             if efforts:
@@ -565,7 +568,7 @@ def _synthesized_model(provider: str, model_id: str) -> dict:
         "description": "Reported by the provider API",
         "discovered": True,
     })
-    entry.setdefault("context_size", preset.get("context_size", DEFAULT_CONTEXT_SIZE))
+    entry.setdefault("context_size", preset.get("context_size", DEFAULT_REMOTE_CONTEXT_SIZE))
     return entry
 
 
@@ -703,6 +706,7 @@ def apply_provider_selection(
         config.api_base_url = base_url.rstrip("/")
         config.api_model = model_id.strip()
         config.api_key_env = api_key_env.strip()
+        config.context_size = DEFAULT_REMOTE_CONTEXT_SIZE
         config.reasoning_effort = (reasoning_effort or "").strip()
         config.reasoning_effort_max = config.reasoning_effort
         config.thinking_mode = (thinking_mode or "").strip()
@@ -992,6 +996,8 @@ class TetherConfig:
             # future runtime switch could reinterpret it as another key.
             legacy_key = str(data.get("api_key", "") or "").strip()
             active_provider = str(data.get("provider", "") or "")
+            if "context_size" not in data and active_provider and active_provider != "local":
+                data["context_size"] = DEFAULT_REMOTE_CONTEXT_SIZE
             if legacy_key and active_provider:
                 mapped = dict(data.get("api_keys") or {})
                 mapped.setdefault(active_provider, legacy_key)

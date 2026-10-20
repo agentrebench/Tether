@@ -19,12 +19,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from ..core.config import TetherConfig, default_provider_model
+from ..core.config import DEFAULT_REMOTE_CONTEXT_SIZE, TetherConfig, default_provider_model
 from ..core.models import Message, StreamEvent, ToolDefinition
 
 
 DEFAULT_CODEX_TIMEOUT_SEC = 900
-DEFAULT_PROMPT_HISTORY_CHARS = 60_000
 
 
 class CancelledByUser(Exception):
@@ -146,7 +145,7 @@ class CodexExecBackend:
                 "confirm `codex login status` succeeds."
             )
 
-        prompt = self._build_prompt(messages)
+        prompt = self._build_prompt(messages, context_size=self.config.context_size)
         exe_path, cmd, timeout, out_path = self._build_exec_cmd(exe, json_mode=False)
         try:
             proc = subprocess.run(
@@ -208,7 +207,7 @@ class CodexExecBackend:
                 "Codex CLI is not logged in. Run `codex login --device-auth`."
             )
 
-        prompt = self._build_prompt(messages)
+        prompt = self._build_prompt(messages, context_size=self.config.context_size)
         exe_path, cmd, timeout, _ = self._build_exec_cmd(exe, json_mode=True)
         usage: dict = {}
         final_text = ""
@@ -351,6 +350,7 @@ class CodexExecBackend:
             cmd.extend(["-o", str(out_path)])
         if model:
             cmd.extend(["-m", model])
+        cmd.extend(["-c", f"model_context_window={self.config.context_size}"])
         # A transient override (plan mode) wins over the configured effort,
         # exactly like the HTTP backend; Codex takes it as a config override.
         effort = (getattr(self, "reasoning_effort_override", "") or self.config.reasoning_effort or "").strip()
@@ -360,8 +360,11 @@ class CodexExecBackend:
         return exe, cmd, timeout, out_path
 
     @staticmethod
-    def _build_prompt(messages: list[Message]) -> str:
-        max_chars = int(os.environ.get("TETHER_CODEX_PROMPT_CHARS", DEFAULT_PROMPT_HISTORY_CHARS))
+    def _build_prompt(messages: list[Message], *, context_size: int = DEFAULT_REMOTE_CONTEXT_SIZE) -> str:
+        # Match the engine's approximate four-characters-per-token accounting.
+        # An explicit environment cap can narrow this budget, never expand it.
+        budget = max(1024, int(context_size) * 4)
+        max_chars = max(1024, min(budget, int(os.environ.get("TETHER_CODEX_PROMPT_CHARS", budget))))
         blocks: list[str] = [
             "You are the language-model backend for the Tether developer agent.",
             "Use only the supplied conversation. Do not run commands, inspect files, "
@@ -379,8 +382,9 @@ class CodexExecBackend:
         if len(prompt) <= max_chars:
             return prompt
         head = "\n\n".join(blocks[:5])
-        tail_budget = max(1000, max_chars - len(head) - 80)
-        return f"{head}\n\n[Earlier conversation truncated]\n\n{prompt[-tail_budget:]}"
+        marker = "\n\n[Earlier conversation truncated]\n\n"
+        tail_budget = max_chars - len(head) - len(marker)
+        return f"{head}{marker}{prompt[-tail_budget:]}"
 
 
 def _format_message_for_prompt(msg: Message) -> str:
@@ -391,8 +395,6 @@ def _format_message_for_prompt(msg: Message) -> str:
     if not content and msg.tool_calls:
         names = ", ".join(tc.name for tc in msg.tool_calls)
         content = f"[assistant requested tool call(s): {names}]"
-    if len(content) > 8000:
-        content = content[:4000] + "\n...[message truncated]...\n" + content[-3000:]
     return f"{role}:\n{content}"
 
 

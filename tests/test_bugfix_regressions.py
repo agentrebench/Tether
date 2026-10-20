@@ -223,10 +223,10 @@ class CodexCatalogFromCliCache(unittest.TestCase):
         nova = models[0]
         self.assertEqual(nova["reasoning_efforts"], ["low", "medium", "ultra"])
         self.assertEqual(nova["default_reasoning_effort"], "medium")
-        self.assertEqual(nova["context_size"], 300000)
+        self.assertEqual(nova["context_size"], 1_000_000)
         self.cfg.apply_provider_selection(config, "codex", "gpt-9.1-nova", reasoning_effort="ultra")
         self.assertEqual((config.api_model, config.reasoning_effort, config.context_size),
-                         ("gpt-9.1-nova", "ultra", 300000))
+                         ("gpt-9.1-nova", "ultra", 1_000_000))
 
     def test_codex_backend_passes_reasoning_effort(self):
         from tether.engine.codex_backend import CodexExecBackend as CodexBackend

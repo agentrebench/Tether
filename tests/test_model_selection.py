@@ -74,7 +74,7 @@ def test_bare_model_lists_codex_and_number_selection_reaches_backend(capsys):
     repl._handle_model(["/model", "2"], SimpleNamespace())
     assert config.provider == "codex" and config.api_model == "gpt-6-astra"
     assert config.reasoning_effort == "medium" and config.reasoning_effort_max == "ultra"
-    assert config.context_size == 272000
+    assert config.context_size == 1_000_000
     config.save.assert_called_once()
     _, command, _, _ = CodexExecBackend(config)._build_exec_cmd("codex", json_mode=True)
     assert command[command.index("-m") + 1] == "gpt-6-astra"
@@ -111,6 +111,44 @@ def test_api_models_include_all_pages_and_only_this_accounts_models(monkeypatch)
     apply_provider_selection(config, "anthropic", "claude-new")
     assert config.api_model == "claude-new"
     assert get.call_count == 2
+
+
+def test_all_remote_catalogs_and_selections_default_to_one_million(monkeypatch):
+    monkeypatch.setattr(catalog, "discover_provider_models", lambda *a, **k: [])
+    for provider, preset in catalog.REMOTE_PROVIDERS.items():
+        assert preset["context_size"] == 1_000_000
+        for model in provider_models(provider):
+            assert model["context_size"] == 1_000_000
+            config = TetherConfig(context_size=32768)
+            apply_provider_selection(config, provider, model["id"])
+            assert config.context_size == 1_000_000
+            apply_provider_selection(config, "local")
+            assert config.context_size == 32768
+    assert {m["context_size"] for m in catalog.codex_cache_models()} == {1_000_000}
+    assert catalog._synthesized_model("custom", "new-model")["context_size"] == 1_000_000
+
+
+def test_custom_provider_context_default_and_local_restore():
+    config = TetherConfig(context_size=32768)
+    apply_provider_selection(config, "custom", "my-model", base_url="http://localhost:9999/v1")
+    assert config.context_size == 1_000_000
+    apply_provider_selection(config, "local")
+    assert config.context_size == 32768
+
+
+@pytest.mark.parametrize("provider", ["codex", "openai", "custom", "local"])
+def test_context_loading_uses_remote_default_and_preserves_explicit_override(tmp_path, provider):
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"provider": provider}))
+    assert TetherConfig.load(path).context_size == (131072 if provider == "local" else 1_000_000)
+    path.write_text(json.dumps({"provider": provider, "context_size": 123456}))
+    assert TetherConfig.load(path).context_size == 123456
+
+
+def test_welcome_displays_exact_context_budget(capsys):
+    repl = repl_for(TetherConfig(provider="codex", api_model="gpt-6-astra", context_size=1_000_000))
+    repl._print_welcome("Hello")
+    assert "1,000,000 context" in capsys.readouterr().out
 
 
 def test_refresh_and_account_changes_do_not_reuse_the_wrong_catalog(monkeypatch):

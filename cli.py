@@ -1634,10 +1634,8 @@ def cmd_remote(args: argparse.Namespace) -> int:
         if not (args.base_url and args.model and args.api_key_env):
             print(error("  custom requires --base-url, --model, and --api-key-env"))
             return 1
-        config.provider = "custom"
-        config.api_base_url = args.base_url.rstrip("/")
-        config.api_model = args.model
-        config.api_key_env = args.api_key_env
+        apply_provider_selection(config, "custom", args.model,
+                                 base_url=args.base_url, api_key_env=args.api_key_env)
     elif target in REMOTE_PROVIDERS:
         preset = REMOTE_PROVIDERS[target]
         # Stash local context_size on first transition to remote so we can

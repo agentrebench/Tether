@@ -689,6 +689,18 @@ Lives at `~/.tether/config.json` (mode `0600`).
 
 Important fields and defaults:
 
+Remote provider/model selections default to **1,000,000 context tokens**, including
+discovered models and custom endpoints. This is Tether's configured context budget;
+the service still enforces its own model limits. Saved explicit `context_size`
+values remain in effect until a new model is selected. Local GGUF context continues
+to follow model/GPU tuning (the local fallback below is 131072).
+
+The Codex adapter forwards this budget through `model_context_window` and sizes
+its bounded prompt serialization accordingly. `TETHER_CODEX_PROMPT_CHARS` can set
+a smaller serialization cap. The old 60,000-character history and 8,000-character
+per-message caps no longer discard otherwise in-budget context. Output-token
+limits and cumulative cost budgets are separate settings.
+
 ```
 host                      127.0.0.1
 port                      8080
