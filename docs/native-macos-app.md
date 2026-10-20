@@ -80,9 +80,10 @@ pinned and SHA-256 checked. Later offline builds omit `--fetch`.
 current Python source. Bundled licenses and btop's source URL/SBOM are in
 `Contents/Resources/licenses`.
 
-The bundle is locally ad-hoc signed and verified. Distribution to other Macs
-still requires the usual Developer ID signing/notarization workflow; this
-build script does not publish or release anything.
+By default the bundle is locally ad-hoc signed and verified. Setting
+`APPLE_SIGNING_IDENTITY` signs the app and embedded libraries with that identity.
+Use the distribution packaging workflow below to notarize it for other Macs;
+the app build script does not notarize, publish, or release anything.
 
 ### Disk image installer
 
@@ -114,6 +115,19 @@ anything to Apple's notarization service. Omit it to use the existing Developer
 ID signing/notarization flow when configured. An ad-hoc build is not notarized
 for distribution to other Macs. Packaging does not upload a GitHub release or
 replace the installed application.
+
+For a distribution build, configure the `tether-notary` Keychain profile with
+`xcrun notarytool store-credentials tether-notary` using its secure interactive
+prompts (keep passwords out of shell arguments and environment variables), then
+run `bash desktop/scripts/package_macos.sh` without `--adhoc`. The packager
+discovers a Developer ID Application identity (or uses `APPLE_SIGNING_IDENTITY`)
+and passes it to PyInstaller so the embedded Python libraries are signed before
+being archived. The app and helpers use the hardened runtime and secure
+timestamps. After Apple's acceptance, the packager staples both the app and
+DMG and checks Gatekeeper. `TETHER_NOTARY_PROFILE` selects a different existing
+Keychain profile. If Apple returns HTTP 403 about an agreement, the team's
+Account Holder must review the pending agreement in their Apple Developer
+account before notarization can continue.
 
 ```sh
 python -m pytest -q

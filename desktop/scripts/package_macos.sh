@@ -11,9 +11,8 @@
 #                            Auto-detected from the login keychain when unset.
 #   TETHER_NOTARY_PROFILE    notarytool keychain profile name (default:
 #                            "tether-notary"). Create it once with:
-#                              xcrun notarytool store-credentials tether-notary \
-#                                --apple-id you@example.com --team-id TEAMID \
-#                                --password <app-specific-password>
+#                              xcrun notarytool store-credentials tether-notary
+#                            Enter credentials at its secure interactive prompts.
 #                            (or --key/--key-id/--issuer for an App Store
 #                            Connect API key). Credentials never touch this
 #                            script or the repo.
@@ -87,10 +86,17 @@ elif [[ "${TETHER_SKIP_NOTARIZE:-0}" == "1" ]]; then
     NOTARIZE=0
 else
     # Fail fast if the notary profile is missing, before a long build.
-    if ! xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" >/dev/null 2>&1; then
+    if ! NOTARY_ERROR="$(xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" 2>&1 >/dev/null)"; then
         echo "error: notarytool keychain profile '$NOTARY_PROFILE' is not usable." >&2
-        echo "       Create it with: xcrun notarytool store-credentials $NOTARY_PROFILE \\" >&2
-        echo "         --apple-id <apple-id> --team-id <TEAMID> --password <app-specific-password>" >&2
+        printf '%s\n' "$NOTARY_ERROR" >&2
+        case "$NOTARY_ERROR" in
+            *"required agreement"*)
+                echo "       The Account Holder must review pending agreements at" >&2
+                echo "       https://developer.apple.com/account/. Allow time for propagation." >&2 ;;
+            *)
+                echo "       Configure credentials at the secure interactive prompts:" >&2
+                echo "       xcrun notarytool store-credentials $NOTARY_PROFILE" >&2 ;;
+        esac
         echo "       or set TETHER_SKIP_NOTARIZE=1 to sign without notarizing." >&2
         exit 1
     fi

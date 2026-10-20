@@ -118,9 +118,12 @@ def main():
     shutil.copy2(ROOT / "LICENSE", licenses / "Tether-LICENSE")
     shutil.copy2(ROOT / "desktop/src-tauri/icons/icon.icns", resources / "tether.icns")
     (licenses / "NOTICE.txt").write_text("Tether native terminal 0.4.0\nPython agent engine 0.3.1\nbtop 1.4.7, Apache-2.0, https://github.com/aristocratos/btop\nxterm 6.0.0 / fit 0.11.0, MIT, https://github.com/xtermjs/xterm.js\nFira Code 6.2 patched by Nerd Fonts 3.4.0, OFL-1.1 and accompanying glyph licenses.\nTether Mono is a CSS alias, not a modified font.\nSee accompanying license files and btop source URL for the corresponding source.\n")
-    for binary in (resources / "bin/tether", resources / "bin/btop"):
-        run("/usr/bin/codesign", "--force", "--sign", "-", binary)
-    run("/usr/bin/codesign", "--force", "--sign", "-", app)
+    identity = os.environ.get("APPLE_SIGNING_IDENTITY") or "-"
+    sign_options = ["--force", "--sign", identity]
+    if identity != "-":
+        sign_options += ["--options", "runtime", "--timestamp"]
+    for binary in (resources / "bin/tether", resources / "bin/btop", app):
+        run("/usr/bin/codesign", *sign_options, binary)
     run("/usr/bin/codesign", "--verify", "--deep", "--strict", app)
     run(resources / "bin/btop", "--version")
     (ROOT / "build/native/package.json").write_text(json.dumps({"app":str(app),"btop_sha256":BTOP_SHA,"assets":ASSETS,"platform":platform.platform(),"engine_sha256":hashlib.sha256(engine.read_bytes()).hexdigest()},indent=2))

@@ -32,6 +32,12 @@ def main() -> int:
     shutil.copytree(root / "skills_builtin", package / "skills_builtin")
     env = dict(os.environ, PYTHONPATH=str(source))
     env.setdefault("PYINSTALLER_CONFIG_DIR", str(build / "cache"))
+    # One-file libraries must be signed before PyInstaller embeds them. Signing
+    # only the finished executable leaves ad-hoc libraries inside its archive.
+    signing_args = []
+    identity = os.environ.get("APPLE_SIGNING_IDENTITY", "")
+    if platform.system() == "Darwin" and identity and identity != "-":
+        signing_args = ["--codesign-identity", identity]
     subprocess.run([
         sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean",
         "--onefile", "--name", "tether", "--console",
@@ -39,6 +45,7 @@ def main() -> int:
         "--specpath", str(build), "--paths", str(source),
         "--collect-submodules", "tether",
         "--add-data", f"{package / 'skills_builtin'}{os.pathsep}tether/skills_builtin",
+        *signing_args,
         str(package / "__main__.py"),
     ], env=env, cwd=build, check=True)
 
