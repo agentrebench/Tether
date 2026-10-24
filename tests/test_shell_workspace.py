@@ -29,6 +29,9 @@ def shell_home(monkeypatch, tmp_path):
     monkeypatch.setenv('TETHER_CONFIG_DIR', str(tmp_path / 'config'))
     monkeypatch.delenv('ZSH_CUSTOM', raising=False)
     monkeypatch.delenv('ZSH', raising=False)
+    # Exercise the fixture startup files without distro-wide interactive
+    # setup (Ubuntu's global compinit can otherwise wait for approval).
+    (tmp_path / '.zshenv').write_text('unsetopt GLOBAL_RCS\n')
     (tmp_path / '.zshrc').write_text("PROMPT='READY> '; HISTFILE=''; bindkey -e\n")
     return tmp_path
 

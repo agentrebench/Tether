@@ -52,6 +52,11 @@ def test_catalog_is_complete_offline_and_local_custom_themes_win(shell_home, mon
 def test_bundled_prompts_preserve_startup_and_avoid_framework_side_effects(shell_home, name):
     rc = shell_home / '.zshrc'
     rc.write_text("export THEME_STARTUP=preserved\nalias user_alias='echo keep'\nHISTFILE=''\nPROMPT='OLD>'\n")
+    if name == 'random':
+        # Test the random theme loader deterministically. Other bundled themes
+        # may only set PROMPT in precmd, which zsh -ilc does not invoke.
+        with rc.open('a') as stream:
+            stream.write('ZSH_THEME_RANDOM_CANDIDATES=(robbyrussell)\n')
     update = shell_home / '.zsh-update'
     update.write_text('must stay here')
     original = {p.name: p.read_bytes() for p in shell_home.iterdir() if p.is_file()}
@@ -60,6 +65,8 @@ def test_bundled_prompts_preserve_startup_and_avoid_framework_side_effects(shell
         'print -r -- "HISTORY:$HISTFILE"; print -r -- "PROMPT:$PROMPT"')
     assert 'STARTUP:preserved' in output and 'ALIAS:echo keep' in output and 'HISTORY:\n' in output
     assert 'PROMPT:OLD>' not in output and output.split('PROMPT:', 1)[1].strip()
+    if name == 'random':
+        assert "Random theme 'robbyrussell' loaded" in output
     assert not (shell_home / '.oh-my-zsh').exists()
     assert original == {p.name: p.read_bytes() for p in shell_home.iterdir() if p.is_file()}
     assert not (shell_home / '.cache').exists()
