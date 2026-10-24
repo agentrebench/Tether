@@ -1,10 +1,12 @@
-"""Discover installed themes without sourcing shell code or changing startup files."""
+"""Discover bundled and installed themes without executing shell code."""
 from __future__ import annotations
 
 from dataclasses import dataclass
 from itertools import islice
 import os
 from pathlib import Path
+
+BUNDLED_OMZ = Path(__file__).resolve().parents[1] / "vendor" / "oh-my-zsh"
 
 
 @dataclass(frozen=True)
@@ -26,15 +28,18 @@ def theme_catalog() -> list[ThemeChoice]:
         "/opt/homebrew/share/oh-my-zsh", "/usr/share/oh-my-zsh",
     ) if value))
     installed = {}
-    for root in roots:
-        if not (root / "oh-my-zsh.sh").is_file():
+    for root in [*roots, BUNDLED_OMZ]:
+        bundled = root == BUNDLED_OMZ
+        if not (root / ("manifest.json" if bundled else "oh-my-zsh.sh")).is_file():
             continue
         custom = Path(os.environ.get("ZSH_CUSTOM") or root / "custom").expanduser()
         # Match Oh My Zsh's custom-theme precedence. One subdirectory supports
         # common installs such as custom/themes/powerlevel10k/powerlevel10k.
-        for directory, source in ((custom, "Custom · Oh My Zsh"),
-                                  (custom / "themes", "Custom · Oh My Zsh"),
-                                  (root / "themes", "Oh My Zsh")):
+        directories = ((root / "themes", "Included · Oh My Zsh"),) if bundled else (
+            (custom, "Custom · Oh My Zsh"), (custom / "themes", "Custom · Oh My Zsh"),
+            (root / "themes", "Installed · Oh My Zsh"),
+        )
+        for directory, source in directories:
             for pattern in ("*.zsh-theme", "*/*.zsh-theme") if directory == custom / "themes" else ("*.zsh-theme",):
                 for path in sorted(islice(directory.glob(pattern), 2000)):
                     if len(installed) >= 2000:
@@ -51,4 +56,4 @@ def find_theme(theme: str) -> ThemeChoice:
     for item in theme_catalog():
         if item.id == theme:
             return item
-    raise ValueError(f"Theme is not installed: {theme}. Choose a theme from Settings or tether theme list.")
+    raise ValueError(f"Theme is not available: {theme}. Choose a theme from Settings or tether theme list.")

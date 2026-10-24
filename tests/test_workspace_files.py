@@ -1,6 +1,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
+import os
 
 import pytest
 
@@ -49,6 +50,38 @@ def test_tree_handles_deleted_folders_and_bounded_previews(tmp_path):
     assert "not a regular file" in file_preview(tmp_path)
     with pytest.raises(NotADirectoryError):
         tree.set_root(file)
+
+
+def test_scoped_preview_and_tree_refuse_replaced_directory_symlinks(tmp_path):
+    root = tmp_path / "project"
+    root.mkdir()
+    folder = root / "src"
+    folder.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "private.txt").write_text("PRIVATE_CONTENT")
+    tree = FileTree(root)
+    tree.toggle(folder)
+    tree.rows()
+    folder.rmdir()
+    folder.symlink_to(outside, target_is_directory=True)
+    tree.refresh()
+    assert tree.children(folder)[0].note
+    assert "PRIVATE_CONTENT" not in file_preview(folder / "private.txt", root=root)
+    assert "Cannot preview" in file_preview(outside / "private.txt", root=root)
+    fifo = root / "fifo"
+    os.mkfifo(fifo)
+    assert "Cannot preview" in file_preview(fifo, root=root)
+
+
+def test_tree_bounds_cached_and_expanded_directories(tmp_path):
+    tree = FileTree(tmp_path)
+    for i in range(tree.MAX_DIRECTORIES + 10):
+        folder = tmp_path / str(i)
+        folder.mkdir()
+        tree.toggle(folder)
+        tree.children(folder)
+    assert len(tree.expanded) == len(tree._cache) == tree.MAX_DIRECTORIES
 
 
 @pytest.mark.parametrize("direction,axis,before", [

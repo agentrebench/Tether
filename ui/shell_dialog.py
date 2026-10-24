@@ -1,4 +1,4 @@
-"""Search installed zsh themes and configure new terminal sessions."""
+"""Search included and installed zsh themes for new terminal sessions."""
 from prompt_toolkit.completion import PathCompleter
 from prompt_toolkit.filters import Condition
 from prompt_toolkit.layout import ConditionalContainer, HSplit, VSplit
@@ -33,7 +33,7 @@ class ShellDialog:
             body=HSplit([
                 self.search,
                 VSplit([
-                    HSplit([Label(f"{len(self.catalog) - 4} installed · 2 built in", style="class:muted"),
+                    HSplit([Label(f"{len(self.catalog) - 4} Oh My Zsh · 2 built in", style="class:muted"),
                             self.theme], width=Dimension(min=16, preferred=48)),
                     HSplit([
                         Label("Shell", style="class:brand"), self.shell_choice,

@@ -17,6 +17,8 @@ from prompt_toolkit.output import ColorDepth
 from prompt_toolkit.styles import Style
 
 from .panes import Pane, PaneLayout
+from .directory_dialog import DirectoryDialog
+from .file_explorer import FileExplorer
 from .shell_dialog import ShellDialog
 from .shell_theme import save_settings
 from .terminal_backend import ShellBackend, tether_command
@@ -49,10 +51,13 @@ class ShellWorkspace:
         self.backends = set()
         self._next_id = 1
         self._stopping = False
+        self.files_visible = True
+        self.file_focus = "terminal"
+        self.explorer = FileExplorer(self)
         self.empty = Window(FormattedTextControl("Open a terminal with +, or choose Settings."))
         bindings = KeyBindings()
         idle = Condition(lambda: self.dialog is None)
-        for key, action in (("f2", self.open_settings), ("f4", self.new_terminal),
+        for key, action in (("f2", self.open_settings), ("f3", self.toggle_files), ("f4", self.new_terminal),
                             ("f6", self.next_pane), ("f7", self.next_tab),
                             ("f8", self.split), ("f9", self.new_agent)):
             bindings.add(key, filter=idle, eager=True)(lambda event, action=action: action())
@@ -65,10 +70,10 @@ class ShellWorkspace:
         # belong to the PTY, not to an agent composer or a global prefix map.
         bar = VSplit([
             Window(FormattedTextControl(self.tab_bar), height=1, style="class:bar"),
-            Window(FormattedTextControl(self.actions), width=30, height=1, style="class:bar"),
+            Window(FormattedTextControl(self.actions), width=37, height=1, style="class:bar"),
         ])
         self.root = FloatContainer(HSplit([
-            bar, DynamicContainer(self.visible_content),
+            bar, DynamicContainer(self.workspace_content),
             ConditionalContainer(Window(FormattedTextControl(self.status), height=1, style="class:bar"),
                                  filter=Condition(lambda: bool(self.notice or self.is_scrollback()
                                                                 or (self.active and self.active.draft)))),
@@ -81,6 +86,10 @@ class ShellWorkspace:
                 "bar": "bg:#1b2229 #aab8c5", "brand": "#7dd9bf bold",
                 "tab-active": "bg:#33434a #e5fff7 bold noreverse",
                 "muted": "#91a0ae", "border": "#33434a", "action": "#dce3e9",
+                "explorer": "bg:#151d23 #c0ccd5",
+                "folder-selected": "bg:#2b4146 #e5fff7 noreverse",
+                "text-area": "bg:#101418 #dce3e9",
+                "text-area last-line": "nounderline",
                 "dialog": "bg:#1b2229 #dce3e9", "dialog.body": "bg:#1b2229 #dce3e9",
                 "dialog.body text-area": "bg:#101418 #e5fff7",
                 "dialog.body text-area last-line": "nounderline",
@@ -119,7 +128,7 @@ class ShellWorkspace:
     def actions(self):
         return [("class:action", text, self.click(action)) for text, action in (
             (" + ", self.new_terminal), (" Agent ", self.new_agent),
-            (" Split ", self.split), (" Settings ", self.open_settings),
+            (" Split ", self.split), (" Files ", self.toggle_files), (" Settings ", self.open_settings),
         )]
 
     def status(self):
@@ -134,14 +143,75 @@ class ShellWorkspace:
                     ("", " Browse themes ", self.click(self.open_settings))]
         return [("class:muted", " " + label(self.notice))]
 
-    def visible_content(self):
+    def workspace_content(self):
+        if not hasattr(self, "app"):
+            return self.empty
+        size = self.app.output.get_size()
+        narrow = size.columns < 80 or size.rows < 18
+        if narrow:
+            if self.files_visible and self.file_focus == "tree":
+                return self.explorer.sidebar
+            if self.explorer.path and self.file_focus == "preview":
+                return self.explorer.viewer
+            return self.visible_content()
+        body = self.visible_content(size.columns - (29 if self.files_visible else 0),
+                                    size.rows // 2 if self.explorer.path else size.rows - 1)
+        if self.explorer.path:
+            body = HSplit([self.explorer.viewer, Window(height=1, char="─", style="class:border"), body])
+        if self.files_visible:
+            return VSplit([HSplit([self.explorer.sidebar], width=28),
+                           Window(width=1, char="│", style="class:border"), body])
+        return body
+
+    def visible_content(self, width=None, height=None):
         if not self.active:
             return self.empty
         size = self.app.output.get_size()
-        rects = self.active.panes.rectangles(size.columns, size.rows - 1)
+        rects = self.active.panes.rectangles(width or size.columns, height or size.rows - 1)
         if any(w < 24 or h < 6 for _, _, w, h in rects.values()):
             return self.active.widgets[self.active.panes.active.id]
         return self.active.tree
+
+    def focus_terminal(self):
+        if self.active:
+            self.focus_tab(self.active)
+
+    def focus_files(self):
+        self.files_visible = True
+        self.file_focus = "tree"
+        self.app.layout.update_parents_relations()
+        self.app.layout.focus(self.explorer.control)
+        self.invalidate()
+
+    def toggle_files(self):
+        if self.files_visible and self.app.layout.has_focus(self.explorer.control):
+            self.files_visible = False
+            self.focus_terminal()
+        else:
+            self.files_visible = True
+            self.explorer.refresh()
+            self.focus_files()
+        self.invalidate()
+
+    def open_folder(self):
+        if self.dialog:
+            return
+        self.dialog = DirectoryDialog(self.cwd, self.explorer.tree.show_hidden,
+                                      self.change_folder, self.close_dialog)
+        self.root.floats.append(Float(content=self.dialog.dialog))
+        self.app.layout.update_parents_relations()
+        self.app.layout.focus(self.dialog.path)
+        self.invalidate()
+
+    def change_folder(self, path, show_hidden=False):
+        try:
+            self.explorer.set_root(Path(path), show_hidden)
+        except (OSError, ValueError) as exc:
+            self.dialog.message = f"Cannot open directory: {label(exc)}"
+            return
+        self.cwd = self.explorer.tree.root
+        self.close_dialog()
+        self.focus_files()
 
     def rebuild(self, tab):
         def build(node):
@@ -158,6 +228,7 @@ class ShellWorkspace:
         if tab not in self.tabs:
             return
         self.active = tab
+        self.file_focus = "terminal"
         self.app.layout.update_parents_relations()
         terminal = tab.panes.active.terminal
         self.app.layout.focus(terminal.copy_buffer_control if terminal.is_copying else terminal.terminal_control)
@@ -165,8 +236,13 @@ class ShellWorkspace:
 
     def sync_focus(self):
         if self.active and not self.dialog:
+            if self.app.layout.has_focus(self.explorer.control):
+                self.file_focus = "tree"
+            elif self.app.layout.has_focus(self.explorer.preview):
+                self.file_focus = "preview"
             for pane in self.active.panes.leaves():
                 if self.app.layout.has_focus(pane.terminal.terminal_control) or self.app.layout.has_focus(pane.terminal.copy_buffer_control):
+                    self.file_focus = "terminal"
                     self.active.panes.active = pane
                     break
 

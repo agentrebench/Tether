@@ -114,6 +114,8 @@ static void test_shell(void) {
     pid_t pid = tt_runtime_child_pid(result.runtime, id);
     send_text(&result, id, "printf '\\nPTY_%s\\n' READY\n");
     await_text(&result, "PTY_READY");
+    CHECK(tt_runtime_foreground_pid(result.runtime, id) == pid);
+    CHECK(tt_runtime_foreground_pid(result.runtime, 0) == -1);
     CHECK(tt_runtime_resize(result.runtime, id, 93, 37));
     CHECK(!tt_runtime_resize(result.runtime, id, 0, 37));
     send_text(&result, id, "stty size\n");
@@ -126,6 +128,7 @@ static void test_shell(void) {
     send_text(&result, id, "exit 7\n");
     await_done(&result);
     CHECK(result.exits == 1 && result.exit_code == 7);
+    CHECK(tt_runtime_foreground_pid(result.runtime, id) == -1);
     check_reaped(pid);
     tt_runtime_destroy(result.runtime);
 }
@@ -142,6 +145,7 @@ static void test_arguments_and_fds(void) {
     const char *const argv[] = {link, "--fixture-argv", "literal $(touch BAD); `id`", NULL};
     tt_session_id id = launch(&result, argv, false, false, directory);
     CHECK(!tt_runtime_resize(result.runtime, id, 80, 24));
+    CHECK(tt_runtime_foreground_pid(result.runtime, id) == -1);
     await_done(&result);
     CHECK(result.exits == 1 && result.exit_code == 0);
     CHECK(strstr(result.bytes, "literal $(touch BAD); `id`") != NULL);
@@ -269,12 +273,14 @@ static void test_failed_launch(void) {
 static void test_environment_and_exec_failure(void) {
     capture result = begin();
     const char *const argv[] = {"/usr/bin/env", NULL};
-    const char *const envp[] = {"TETHER_LITERAL=value with $(literal); spaces", NULL};
+    /* ASan's exec helper needs an absolute PATH to find macOS atos even with
+       this deliberately minimal child environment. */
+    const char *const envp[] = {"TETHER_LITERAL=value with $(literal); spaces", "PATH=/usr/bin:/bin", NULL};
     tt_launch request = {.argv = argv, .envp = envp};
     char error[128];
     CHECK(tt_runtime_spawn(result.runtime, &request, error, sizeof(error)) > 0);
     await_done(&result);
-    CHECK(strcmp(result.bytes, "TETHER_LITERAL=value with $(literal); spaces\n") == 0);
+    CHECK(strcmp(result.bytes, "TETHER_LITERAL=value with $(literal); spaces\nPATH=/usr/bin:/bin\n") == 0);
     CHECK(result.exits == 1 && result.exit_code == 0);
     tt_runtime_destroy(result.runtime);
 

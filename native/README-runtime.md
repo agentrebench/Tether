@@ -42,6 +42,23 @@ frozen-loader lifecycle are covered by real process tests. The owner must not
 install SIGCHLD=SIG_IGN, reap the runtime's children, or destroy/pump the runtime
 recursively from a callback.
 
+`tt_runtime_foreground_pid` reads the foreground process group of a live PTY,
+returning -1 for pipes, missing panes, or closing panes. The macOS host checks
+shell panes twice a second and sends only a recognized `claude`/`codex` enum to
+the display, or an empty string for other processes. It does not read process
+arguments, environment, or model messages. This metadata enables optional
+conversation coloring without changing the PTY output or input.
+
+`core/tether_files.c` is a separate, stateless local file reader used by the
+Explorer. The caller owns a heap-allocated `tt_file_result` and may invoke it on
+a worker queue. It walks relative paths from an open root directory, rejects
+parent traversal and symlink components, checks regular-file types, and uses
+nonblocking opens to avoid hanging on FIFOs. Listings and reads have fixed
+limits declared in `tether_files.h`. It owns and closes all temporary descriptors;
+it never executes file content or invokes the Python engine. Tests cover bounds,
+sorting, hidden/binary/empty files, removed paths, and directory replacement by
+a symlink between reads.
+
 ## Build and verification
 
 ```sh

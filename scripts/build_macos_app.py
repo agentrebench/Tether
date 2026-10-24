@@ -6,6 +6,8 @@ offline rebuild uses build/native/vendor and installed npm dependencies.
 """
 from __future__ import annotations
 
+from build_native_web import build_syntax
+
 import argparse
 import hashlib
 import json
@@ -40,7 +42,7 @@ def verify(path, expected):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fetch", action="store_true", help="download missing pinned vendor inputs")
-    parser.add_argument("--reuse-engine", action="store_true", help="use an already rebuilt dist/tether")
+    parser.add_argument("--reuse-engine", action="store_true", help="use an already rebuilt dist/native-engine/tether directory")
     args = parser.parse_args()
     if platform.system() != "Darwin" or platform.machine() != "arm64":
         raise SystemExit("This package target currently requires Apple Silicon macOS 26+.")
@@ -69,10 +71,11 @@ def main():
         if not manifest.exists() or json.loads(manifest.read_text())["version"] != version:
             raise SystemExit("Run npm ci in desktop/ to install the locked terminal renderer.")
     if not args.reuse_engine:
-        run(sys.executable, ROOT / "scripts/build_binary.py")
-    engine = ROOT / "dist/tether"
-    if not engine.exists():
-        raise SystemExit("Build dist/tether first, or omit --reuse-engine.")
+        run(sys.executable, ROOT / "scripts/build_binary.py", "--onedir")
+    engine_dir = ROOT / "dist/native-engine/tether"
+    engine = engine_dir / "tether"
+    if not engine.is_file() or not (engine_dir / "_internal").is_dir():
+        raise SystemExit("Run scripts/build_binary.py --onedir first, or omit --reuse-engine.")
     cmake = shutil.which("cmake") or "/opt/homebrew/bin/cmake"
     build = ROOT / "build/native/release"
     options = ["-G", "Ninja"] if shutil.which("ninja") and not (build / "CMakeCache.txt").exists() else []
@@ -88,6 +91,7 @@ def main():
     shutil.copytree(ROOT / "native/web", resources / "web")
     web_vendor = resources / "web/vendor"
     web_vendor.mkdir()
+    build_syntax(web_vendor)
     licenses = resources / "licenses"
     licenses.mkdir()
     for package, source, target in (("xterm", "lib/xterm.js", "xterm.js"), ("xterm", "css/xterm.css", "xterm.css"), ("addon-fit", "lib/addon-fit.js", "addon-fit.js")):
@@ -96,8 +100,9 @@ def main():
         shutil.copy2(ROOT / f"desktop/node_modules/@xterm/{package}/LICENSE", licenses / (package + "-LICENSE"))
     for name in ASSETS:
         shutil.copy2(VENDOR / name, (web_vendor if name.endswith(".ttf") else licenses) / name)
-    (resources / "bin").mkdir()
-    shutil.copy2(engine, resources / "bin/tether")
+    # Libraries live beside the engine, so a new pane never extracts a runtime.
+    # Preserve PyInstaller's framework symlinks and nested library signatures.
+    shutil.copytree(engine_dir, resources / "bin", symlinks=True)
     # Extract only explicitly selected regular files; never tar paths/symlinks.
     with tarfile.open(bottles[0]) as archive:
         for member in archive.getmembers():
@@ -116,8 +121,10 @@ def main():
                 shutil.copyfileobj(source, destination)
             target.chmod(0o755 if relative == "bin/btop" else 0o644)
     shutil.copy2(ROOT / "LICENSE", licenses / "Tether-LICENSE")
+    shutil.copy2(ROOT / "vendor/oh-my-zsh/LICENSE.txt", licenses / "OhMyZsh-LICENSE.txt")
+    shutil.copy2(ROOT / "vendor/oh-my-zsh/manifest.json", licenses / "OhMyZsh-manifest.json")
     shutil.copy2(ROOT / "desktop/src-tauri/icons/icon.icns", resources / "tether.icns")
-    (licenses / "NOTICE.txt").write_text("Tether native terminal 0.4.0\nPython agent engine 0.3.1\nbtop 1.4.7, Apache-2.0, https://github.com/aristocratos/btop\nxterm 6.0.0 / fit 0.11.0, MIT, https://github.com/xtermjs/xterm.js\nFira Code 6.2 patched by Nerd Fonts 3.4.0, OFL-1.1 and accompanying glyph licenses.\nTether Mono is a CSS alias, not a modified font.\nSee accompanying license files and btop source URL for the corresponding source.\n")
+    (licenses / "NOTICE.txt").write_text("Tether native terminal 0.4.1\nPython agent engine 0.3.1\nbtop 1.4.7, Apache-2.0, https://github.com/aristocratos/btop\nxterm 6.0.0 / fit 0.11.0, MIT, https://github.com/xtermjs/xterm.js\nFira Code 6.2 patched by Nerd Fonts 3.4.0, OFL-1.1 and accompanying glyph licenses.\nTether Mono is a CSS alias, not a modified font.\nSee accompanying license files and btop source URL for the corresponding source.\n")
     identity = os.environ.get("APPLE_SIGNING_IDENTITY") or "-"
     sign_options = ["--force", "--sign", identity]
     if identity != "-":

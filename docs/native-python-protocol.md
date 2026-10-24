@@ -42,8 +42,32 @@ cancellation, errors, and cleanup. Subagent snapshots expose an additive enum
 The messages never contain reasoning text, prompts, tool arguments, or secrets.
 They are UI metadata, never an approval, authentication, or execution channel.
 
-The host consumes OSC 777 only for its agent tab, validates the small enum and
+The host consumes OSC 777 only for its agent pane, validates the small enum and
 sequence, and discards activity on PTY exit. The interactive light may be visible
 only for `thinking` or `reasoning`. Waiting for a user's answer must take priority.
 Existing terminals, plain pipes, and the separate NDJSON desktop bridge remain
 usable without this extension.
+
+## Compact composer resize
+
+The opted-in compact composer also emits bounded, content-free OSC 777 messages:
+
+```
+ESC ] 777 ; tether ; 1 ; input ; ready|prepared|closed BEL
+```
+
+`ready` advertises the active prompt's resize binding; `closed` withdraws it.
+Before changing this pane's terminal grid, the display sends `ESC [ 24 ; 2 ~`
+(F24 / Shift-F12). The prompt temporarily suspends rendering through
+prompt_toolkit's `in_terminal`, erases the composer at the old grid size, and
+emits `prepared`. The display then resizes xterm and the PTY together. Once the
+PTY size changes, the prompt redraws at the new size and advertises `ready`.
+This prevents normal-buffer reflow from shifting the live prompt before its
+old contents can be erased. Transcript lines and the input buffer are retained.
+
+At most one preparation is pending per pane. The Python wait is bounded to
+500 ms; the display falls back after 750 ms if no acknowledgement arrives.
+Raw input remains queued without echo during preparation; cancellation unwinds
+the prompt_toolkit context. Closing the pane cancels its display timer.
+No binding or OSC is installed for non-native/non-compact prompts. The existing
+activity sequence is independent of these composer messages.

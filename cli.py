@@ -1391,8 +1391,9 @@ def cmd_start(args: argparse.Namespace) -> int:
             print(error("Provider 'codex' is configured but Codex CLI is not logged in."))
             print(dim("  run: codex login --device-auth"))
             return 1
-        print(success(f"  using Codex CLI provider ({config.api_model})"))
-        print()
+        if not getattr(args, "compact", False):
+            print(success(f"  using Codex CLI provider ({config.api_model})"))
+            print()
     elif config.is_remote:
         # Remote provider: no local server to start. Just check that *some*
         # key is present (env var or stored) so we fail fast.
@@ -1424,7 +1425,10 @@ def cmd_start(args: argparse.Namespace) -> int:
             return 1
 
     try:
-        repl = TetherREPL(config, plain=getattr(args, "plain", False))
+        options = {"plain": getattr(args, "plain", False)}
+        if getattr(args, "compact", False):
+            options["compact"] = True
+        repl = TetherREPL(config, **options)
         return repl.run(resume=_resume_target(args))
     finally:
         if server_proc and server_proc.poll() is None:
@@ -1761,7 +1765,7 @@ def cmd_theme(args: argparse.Namespace) -> int:
         print(json.dumps({key: getattr(config, key) for key in (
             "terminal_shell", "terminal_theme", "terminal_font_mode", "terminal_theme_file",
         )}, indent=2))
-        print("Browse installed themes: tether theme list, or click Settings in Tether.")
+        print("Browse included and installed themes: tether theme list, or click Settings in Tether.")
         print("Select a Powerline/Nerd Font in your terminal before enabling its glyphs.")
         return 0
     if not args.theme:
@@ -2057,7 +2061,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     theme_parser = subparsers.add_parser("theme", help="Configure zsh themes and Powerline/Nerd Font glyphs")
     theme_parser.add_argument("action", nargs="?", default="show", choices=["show", "set", "list"])
-    theme_parser.add_argument("theme", nargs="?", help="Built-in theme or an installed name from theme list")
+    theme_parser.add_argument("theme", nargs="?", help="Built-in or Oh My Zsh name from theme list")
     theme_parser.add_argument("--shell", help="Shell executable; themes require zsh")
     theme_parser.add_argument("--font", choices=["ascii", "powerline", "nerd"])
     theme_parser.add_argument("--file", help="Local zsh theme file for the custom theme")

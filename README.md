@@ -121,9 +121,22 @@ macOS terminal application
 [Release notes and SHA-256 checksum](https://github.com/agentrebench/Tether/releases/tag/v0.4.0).
 
 Tether now has a standalone macOS terminal app under `native/`. It opens a
-normal login shell, with tabs, split panes, clickable zsh-theme settings,
-live theme previews, a bundled Nerd Font, and btop included. Agents are optional;
+normal login shell, with resizable Terminal, Agent, and Monitor panes in one
+session, clickable zsh-theme settings,
+live theme previews, a bundled Nerd Font, and btop included. A VS Code-style
+Explorer shows expandable folders beside a read-only, syntax-highlighted file preview
+and the live terminal. Drag dividers to resize the sidebar, preview, and nested
+terminal splits. Settings includes whole-app Dark, Light, Gruvbox, Dracula, and
+Solarized palettes, independent of shell prompt themes. File browsing starts
+closed; **Files** or **⌘B** opens it and closes the browser and preview again. Agents are optional;
 an interactive light appears while they think. **⌘,** opens Settings.
+Right-click any pane or use its **···** menu to move it left, right, up, or down.
+Drag a pane's title bar onto another pane's edge to dock it there. Explorer's
+**···** opens its folder, refresh, hidden-file, collapse, and close actions.
+Hover at a terminal's right edge to reveal its scrollback bar. Claude Code and
+Codex conversations can follow the app theme: recognized assistant prose uses
+the accent color and human text uses the foreground color. The pane menu lets
+you select the CLI or restore its original colors.
 
 The agent engine and project knowledge remain in Python. C23 owns terminal
 processes and the light game, with a small Cocoa/WebKit display adapter.
@@ -145,6 +158,16 @@ Click tabs to switch and **×** to close a tab. Exiting the last shell exits Tet
 Small windows show one tab/pane at a time and keep the other processes running.
 New terminals start in the directory where you launched Tether.
 
+The **Explorer** sidebar shows folders first and loads them as you expand them.
+Click **Files** or press **F3** to focus it; press F3 again while browsing to hide
+it. Use **Up/Down** to select, **Left/Right** to collapse/expand, and **Enter** to
+preview a file. Previews are read only, with line numbers and scrolling. **Esc**
+returns focus to the shell. **F5** refreshes the explorer or preview; **.** toggles
+hidden files while browsing. Click **Folder** or press **O** in the tree to choose
+a different root. That folder becomes the starting directory for new terminals;
+existing shells keep their own directories. Small terminals show the focused
+tree, preview, or shell at full width; **F3**, **Tab**, and **Esc** switch focus.
+
 **F2** opens Settings, **F4** opens a terminal, **F6** switches panes, **F7** switches
 tabs, **F8** splits right, and **F9** opens an Agent tab. Normal shell key bindings
 are passed through. Scroll the mouse wheel or press **Shift+PageUp** to browse
@@ -156,7 +179,11 @@ compact Tether chat. You can return to your shell at any time by clicking its ta
 For the full conversation workspace described below, run **`tether chat`**
 (`tether start` and `tether run` also remain available). Choose Claude, Codex, GPT,
 DeepSeek, Kimi, GLM, or a local model with Up/Down and Enter, or click an entry.
-The picker shows credential readiness and includes configured custom providers.
+The picker retains its Tether logo and animated light, shows credential
+readiness, and includes configured custom providers. After selection, compact
+chat uses a small session heading and an input that grows with your text, up to
+eight rows. Its colors follow the native app palette. Enter sends; Alt+Enter
+adds a newline. Slash completion and input history remain available.
 Explicit model/resume options, `--plain`, pipes, and `TERM=dumb` retain their
 existing direct chat behavior.
 
@@ -212,10 +239,13 @@ standard Unicode characters and text labels, so no Nerd Font is required.
 
 ### Zsh themes and Powerline fonts
 
-Click **Settings** in the terminal tab bar. Search and scroll through installed
-**Oh My Zsh themes by name**, alongside the built-in Minimal and Powerline prompts.
+Click **Settings** in the terminal tab bar. Search and scroll through **142 included
+Oh My Zsh themes** from the [official collection](https://github.com/ohmyzsh/ohmyzsh/wiki/Themes),
+including **agnoster**, **robbyrussell**, **af-magic**, **bira**, and **avit**. Your installed
+themes and the built-in Minimal and Powerline prompts appear in the same list.
 The catalog discovers `$ZSH`, `~/.oh-my-zsh`, custom themes, and common system
-installations. No framework or theme download is required when already installed.
+installations. The included themes work offline without an Oh My Zsh installation;
+your installed/custom versions take precedence when names overlap.
 Choose a theme and click **Preview** to try it in a real shell without changing
 your saved preference. Click **Use theme** to keep that preview, or **Browse themes**
 to try another. **Save** persists the selection and opens a terminal using it;
@@ -233,7 +263,7 @@ Terminal commands remain available as an alternative to the settings menu:
 ```bash
 tether theme show
 tether theme list
-tether theme set agnoster       # when installed in Oh My Zsh
+tether theme set agnoster       # included; no separate Oh My Zsh install needed
 tether theme set powerline --shell zsh --font powerline
 tether theme set powerline --font nerd
 tether theme set custom --file ~/.config/zsh/my-theme.zsh

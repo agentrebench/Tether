@@ -12,7 +12,7 @@ from prompt_toolkit.application import Application
 from prompt_toolkit.data_structures import Point
 from prompt_toolkit.filters import Condition
 from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.layout import Float, FloatContainer, HSplit, Layout, VSplit, Window, WindowAlign
+from prompt_toolkit.layout import ConditionalContainer, Float, FloatContainer, HSplit, Layout, VSplit, Window, WindowAlign
 from prompt_toolkit.layout.controls import FormattedTextControl, UIContent, UIControl
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.mouse_events import MouseEventType
@@ -155,18 +155,18 @@ class AgentPicker:
                                         get_cursor_position=lambda: Point(0, self.selected * self._row_height()))
         panel = HSplit([
             Window(FormattedTextControl("◇ TETHER"), height=1, align=WindowAlign.CENTER, style="class:brand"),
-            Window(self.orb, height=lambda: 7 if self._roomy() else 3),
+            Window(self.orb, height=lambda: 7 if self._roomy() else 3 if self._rows_available() >= 20 else 1),
             Window(FormattedTextControl("Select your agent"), height=1, align=WindowAlign.CENTER, style="class:title"),
-            Window(FormattedTextControl("Who are we building with today?"), height=1,
-                   align=WindowAlign.CENTER, style="class:muted"),
-            Window(height=1),
-            VSplit([Window(width=4), Window(self.menu, height=lambda: (len(self.choices) + 1) * self._row_height()),
+            ConditionalContainer(Window(FormattedTextControl("Who are we building with today?"), height=1,
+                   align=WindowAlign.CENTER, style="class:muted"), Condition(lambda: self._rows_available() >= 20)),
+            ConditionalContainer(Window(height=1), Condition(lambda: self._rows_available() >= 20)),
+            VSplit([Window(width=4), Window(self.menu, height=self._menu_height),
                     Window(width=4)]),
-            Window(FormattedTextControl(self._detail), height=2, wrap_lines=True,
-                   align=WindowAlign.CENTER, style="class:muted"),
+            ConditionalContainer(Window(FormattedTextControl(self._detail), height=2, wrap_lines=True,
+                   align=WindowAlign.CENTER, style="class:muted"), Condition(lambda: self._rows_available() >= 20 or bool(self.message))),
             Window(FormattedTextControl("↑ ↓ choose · Enter start · F2 settings · Esc exit"), height=1,
                    align=WindowAlign.CENTER, style="class:muted"),
-        ], width=Dimension(min=24, preferred=54, max=54))
+        ], width=Dimension(min=1, preferred=54, max=54))
         self.root = FloatContainer(
             Box(panel, padding_top=Dimension(min=0), padding_bottom=Dimension(min=0),
                 style="class:welcome"), floats=[])
@@ -197,7 +197,17 @@ class AgentPicker:
         self.app.ttimeoutlen = 0.1
 
     def _roomy(self):
-        return not hasattr(self, "app") or self.app.output.get_size().rows >= 36
+        return self._rows_available() >= 36
+
+    def _rows_available(self):
+        return self.app.output.get_size().rows if hasattr(self, "app") else 36
+
+    def _menu_height(self):
+        preferred = (len(self.choices) + 1) * self._row_height()
+        if self._rows_available() >= 20:
+            return preferred
+        chrome = 4 + (2 if self.message else 0)
+        return min(preferred, max(1, self._rows_available() - chrome))
 
     def _row_height(self):
         return 2 if self._roomy() else 1
