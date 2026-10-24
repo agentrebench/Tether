@@ -1,6 +1,7 @@
 """Real shell input, clickable themes, and agent-optional startup contracts."""
 import asyncio
 import os
+import shlex
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -28,6 +29,9 @@ def shell_home(monkeypatch, tmp_path):
     monkeypatch.setenv('TETHER_CONFIG_DIR', str(tmp_path / 'config'))
     monkeypatch.delenv('ZSH_CUSTOM', raising=False)
     monkeypatch.delenv('ZSH', raising=False)
+    # Exercise the fixture startup files without distro-wide interactive
+    # setup (Ubuntu's global compinit can otherwise wait for approval).
+    (tmp_path / '.zshenv').write_text('unsetopt GLOBAL_RCS\n')
     (tmp_path / '.zshrc').write_text("PROMPT='READY> '; HISTFILE=''; bindkey -e\n")
     return tmp_path
 
@@ -200,6 +204,78 @@ def test_shell_commands_settings_preview_save_and_agent_tab(shell_home, monkeypa
                 await until(lambda: len(first.panes.leaves()) == 1)
                 pipe.send_text('exit\r')
                 await until(lambda: first not in ui.tabs)
+                pipe.send_text('exit\r')
+                assert await asyncio.wait_for(running, 5) == 0
+            finally:
+                if not running.done():
+                    ui.app.exit()
+                    await running
+            assert not ui.backends
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('size', [(20, 60), (32, 110)])
+def test_explorer_browsing_preview_and_folder_change_preserve_shell(shell_home, size):
+    src = shell_home / 'src'
+    src.mkdir()
+    original = "print('file-preview')\n" + "line\n" * 80
+    (src / 'main.py').write_text(original)
+    (shell_home / '.hidden-file').write_text('hidden')
+    other = shell_home / 'other'
+    other.mkdir()
+    (other / 'new.txt').write_text('new folder')
+
+    async def run():
+        with create_pipe_input() as pipe:
+            output = PaintedOutput()
+            output.size = Size(rows=size[0], columns=size[1])
+            ui = ShellWorkspace(TetherConfig(terminal_shell='zsh'), cwd=shell_home, input=pipe, output=output)
+            running = asyncio.create_task(ui.run_async())
+            try:
+                await until(lambda: ui.active and 'READY>' in terminal_text(ui.active.panes.active))
+                first = ui.active
+                backend = first.panes.active.terminal.process.backend
+                await click(ui, 'Files')
+                await until(lambda: ui.app.layout.has_focus(ui.explorer.control))
+                await click(ui, 'src')
+                await click(ui, 'main.py')
+                await until(lambda: ui.app.layout.has_focus(ui.explorer.preview))
+                await until(lambda: 'file-preview' in '\n'.join(frame(ui)))
+                assert 'read only' in '\n'.join(frame(ui))
+                assert 'Window too small' not in '\n'.join(frame(ui))
+                pipe.send_text('tamper')
+                await asyncio.sleep(.1)
+                assert (src / 'main.py').read_text() == original
+                pipe.send_text('\x1b[6~')  # PageDown scrolls the file, not the shell.
+                await until(lambda: ui.explorer.preview.buffer.cursor_position > 0)
+                pipe.send_text('\x1b')
+                await until(lambda: ui.app.layout.has_focus(first.panes.active.terminal.terminal_control))
+                pipe.send_text("printf 'explorer-%s\\n' alive\r")
+                await until(lambda: 'explorer-alive' in terminal_text(first.panes.active))
+                ui.focus_files()
+                pipe.send_text('.')
+                await until(lambda: ui.explorer.tree.show_hidden)
+                assert '.hidden-file' in [row.path.name for row in ui.explorer.tree.rows()]
+                (shell_home / 'added.txt').write_text('newly added')
+                pipe.send_text('\x1b[15~')  # F5
+                await until(lambda: 'added.txt' in [row.path.name for row in ui.explorer.tree.rows()])
+                pipe.send_text('o')
+                await until(lambda: ui.dialog is not None)
+                ui.dialog.path.text = str(other)
+                ui.dialog.open()
+                await until(lambda: ui.cwd == other)
+                assert ui.explorer.path is None
+                assert ui.active is first and first.panes.active.terminal.process.backend is backend
+                ui.focus_terminal()
+                pipe.send_text(f"test \"$PWD\" = {shlex.quote(str(shell_home))} && printf 'OLD_%s\\n' CWD_OK\r")
+                await until(lambda: 'OLD_CWD_OK' in terminal_text(first.panes.active))
+                ui.new_terminal()
+                second = ui.active
+                await until(lambda: 'READY>' in terminal_text(second.panes.active))
+                pipe.send_text(f"test \"$PWD\" = {shlex.quote(str(other))} && printf 'NEW_%s\\n' CWD_OK\r")
+                await until(lambda: 'NEW_CWD_OK' in terminal_text(second.panes.active))
+                pipe.send_text('exit\r')
+                await until(lambda: ui.active is first)
                 pipe.send_text('exit\r')
                 assert await asyncio.wait_for(running, 5) == 0
             finally:

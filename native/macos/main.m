@@ -5,9 +5,11 @@
 #import <QuartzCore/QuartzCore.h>
 #include "tether_runtime.h"
 #include "tether_orb.h"
+#include "tether_files.h"
 #include <math.h>
 #include <signal.h>
 #include <time.h>
+#include <libproc.h>
 
 @interface TetherHost : NSObject <NSApplicationDelegate, NSWindowDelegate, WKScriptMessageHandler, WKNavigationDelegate> {
     tt_runtime *_runtime;
@@ -25,6 +27,11 @@
 @property BOOL deliveredOrbActive;
 @property BOOL orbPending;
 @property CFTimeInterval lastTick;
+@property CFTimeInterval lastProgramPoll;
+@property CGPoint testMousePosition;
+@property BOOL testMovedMouse;
+@property dispatch_queue_t fileQueue;
+@property NSUInteger pendingFiles;
 - (void)deliver:(NSDictionary *)event;
 - (void)output:(tt_session_id)sid bytes:(const unsigned char *)bytes length:(size_t)length;
 - (void)exited:(tt_session_id)sid code:(int)code;
@@ -41,6 +48,7 @@ static void on_exit(void *context, tt_session_id sid, int code) {
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
     (void)notification;
     self.sessions = [NSMutableDictionary dictionary];
+    self.fileQueue = dispatch_queue_create("tether.files", DISPATCH_QUEUE_SERIAL);
     self.resources = NSBundle.mainBundle.resourcePath;
     self.cwd = NSHomeDirectory();
     NSString *stored = [NSUserDefaults.standardUserDefaults stringForKey:@"terminalDirectory"];
@@ -63,12 +71,22 @@ static void on_exit(void *context, tt_session_id sid, int code) {
     self.window.backgroundColor = [NSColor colorWithSRGBRed:.047 green:.063 blue:.078 alpha:1];
     self.window.tabbingMode = NSWindowTabbingModeDisallowed;
     WKWebViewConfiguration *configuration = [WKWebViewConfiguration new];
+    if (self.smokePath) configuration.websiteDataStore = [WKWebsiteDataStore nonPersistentDataStore];
     [configuration.userContentController addScriptMessageHandler:self name:@"tether"];
     self.web = [[WKWebView alloc] initWithFrame:self.window.contentView.bounds configuration:configuration];
     self.web.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     self.web.navigationDelegate = self;
     [self.web setValue:@NO forKey:@"drawsBackground"];
     self.window.contentView = self.web;
+    if (self.smokePath && [NSProcessInfo.processInfo.environment[@"TETHER_APP_SMOKE_SMALL"] isEqual:@"1"]) {
+        // Keep the test viewport fixed even if macOS restores/tiles the window.
+        NSView *fixture = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 680, 440)];
+        self.window.contentView = fixture;
+        self.web.autoresizingMask = NSViewNotSizable;
+        self.web.frame = NSMakeRect(0, 0, 680, 440);
+        [fixture addSubview:self.web];
+        [self.window setContentSize:NSMakeSize(680, 440)];
+    }
     [self installMenu];
     NSURL *url = [NSURL fileURLWithPath:[self.resources stringByAppendingPathComponent:@"web/index.html"]];
     [self.web loadFileURL:url allowingReadAccessToURL:[url URLByDeletingLastPathComponent]];
@@ -97,6 +115,9 @@ static void on_exit(void *context, tt_session_id sid, int code) {
     [edit.submenu addItemWithTitle:@"Copy" action:@selector(copy:) keyEquivalent:@"c"];
     [edit.submenu addItemWithTitle:@"Paste" action:@selector(paste:) keyEquivalent:@"v"];
     [edit.submenu addItemWithTitle:@"Select All" action:@selector(selectAll:) keyEquivalent:@"a"];
+    NSMenuItem *view = [NSMenuItem new]; [menu addItem:view]; view.submenu = [[NSMenu alloc] initWithTitle:@"View"];
+    NSMenuItem *files = [view.submenu addItemWithTitle:@"Toggle Explorer" action:@selector(shellMenu:) keyEquivalent:@"b"];
+    files.target = self; files.representedObject = @"files";
     NSApp.mainMenu = menu;
 }
 - (void)settingsMenu:(id)sender { (void)sender; [self deliver:@{@"type":@"menu", @"action":@"settings"}]; }
@@ -116,6 +137,46 @@ static void on_exit(void *context, tt_session_id sid, int code) {
 - (void)reply:(id)request result:(id)result error:(NSString *)error {
     [self deliver:@{@"type":@"reply", @"request":request ?: @0, @"ok":@(error == nil),
                    @"result":result ?: NSNull.null, @"error":error ?: @""}];
+}
+- (void)readFiles:(NSDictionary *)body request:(id)request {
+    NSString *path = [body[@"path"] isKindOfClass:NSString.class] ? body[@"path"] : nil;
+    NSString *root = [self.cwd stringByResolvingSymlinksInPath];
+    if (!path || [path lengthOfBytesUsingEncoding:NSUTF8StringEncoding] >= TT_FILE_PATH ||
+        [path rangeOfString:[NSString stringWithFormat:@"%C", (unichar)0]].location != NSNotFound ||
+        ![body[@"root"] isEqual:self.cwd] || self.pendingFiles >= 8) {
+        [self reply:request result:nil error:@"Folder changed or file browser is busy. Refresh and try again."]; return;
+    }
+    BOOL hidden = [body[@"hidden"] isKindOfClass:NSNumber.class] && [body[@"hidden"] boolValue];
+    ++self.pendingFiles;
+    dispatch_async(self.fileQueue, ^{
+        tt_file_result *file = calloc(1, sizeof(*file));
+        int code = file ? tt_files_read(root.fileSystemRepresentation, path.length ? path.fileSystemRepresentation : "", hidden, file) : ENOMEM;
+        NSString *error = nil;
+        NSMutableDictionary *result = [NSMutableDictionary dictionary];
+        if (code) error = @"Cannot open this path. It may be unavailable, a symbolic link, or outside the selected folder.";
+        else if (file->kind == TT_FILE_DIRECTORY) {
+            NSMutableArray *entries = [NSMutableArray array];
+            for (size_t i = 0; i < file->count; ++i) {
+                NSString *name = [NSString stringWithUTF8String:file->entries[i].name];
+                if (!name) continue;
+                [entries addObject:@{@"name":name, @"directory":@(file->entries[i].kind == TT_FILE_DIRECTORY),
+                                    @"symlink":@(file->entries[i].kind == TT_FILE_LINK)}];
+            }
+            [result addEntriesFromDictionary:@{@"kind":@"directory", @"entries":entries, @"truncated":@(file->truncated)}];
+        } else {
+            NSString *content = file->kind == TT_FILE_TEXT ? [[NSString alloc] initWithBytes:file->data length:file->length encoding:NSUTF8StringEncoding] : nil;
+            // A byte cap can split the final UTF-8 codepoint. Trim at most 3 bytes.
+            for (size_t trim = 1; !content && file->kind == TT_FILE_TEXT && file->truncated && trim <= 3 && trim <= file->length; ++trim)
+                content = [[NSString alloc] initWithBytes:file->data length:file->length - trim encoding:NSUTF8StringEncoding];
+            [result addEntriesFromDictionary:@{@"kind":content ? @"file" : @"binary", @"content":content ?: @"",
+                                              @"size":@(file->size), @"truncated":@(file->truncated)}];
+        }
+        free(file);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            --self.pendingFiles;
+            [self reply:request result:result error:error];
+        });
+    });
 }
 - (tt_session_id)spawn:(NSArray<NSString *> *)arguments cwd:(NSString *)cwd pty:(BOOL)pty defer:(BOOL)defer error:(NSString **)error {
     NSMutableDictionary *environment = [NSProcessInfo.processInfo.environment mutableCopy];
@@ -176,6 +237,23 @@ static void on_exit(void *context, tt_session_id sid, int code) {
     }
     tt_runtime_pump(_runtime, on_output, on_exit, (__bridge void *)self);
     CFTimeInterval now = CACurrentMediaTime();
+    if (now - self.lastProgramPoll >= .5) {
+        self.lastProgramPoll = now;
+        for (NSNumber *number in self.sessions.allKeys) {
+            NSMutableDictionary *session = self.sessions[number];
+            if (![session[@"kind"] isEqual:@"shell"]) continue;
+            pid_t foreground = tt_runtime_foreground_pid(_runtime, number.unsignedLongLongValue);
+            char name[128] = {0};
+            if (foreground > 0) (void)proc_name(foreground, name, sizeof(name));
+            NSString *process = [NSString stringWithUTF8String:name] ?: @"";
+            NSString *program = [process isEqual:@"claude"] ? @"claude" :
+                ([process isEqual:@"codex"] || [process hasPrefix:@"codex-"]) ? @"codex" : @"";
+            if (![session[@"program"] isEqual:program]) {
+                session[@"program"] = program;
+                [self deliver:@{@"type":@"program", @"id":number, @"program":program}];
+            }
+        }
+    }
     tt_orb_step(&_orb, now - self.lastTick); self.lastTick = now;
     if ((_orb.active || self.deliveredOrbActive) && !self.orbPending) {
         [self deliver:@{@"type":@"orb", @"active":@(_orb.active), @"x":@(_orb.x), @"y":@(_orb.y), @"pulse":@(_orb.pulse), @"score":@(_orb.score), @"combo":@(_orb.combo), @"phase":_orb.phase == TT_REASONING ? @"Reasoning" : @"Thinking"}];
@@ -194,6 +272,8 @@ static void on_exit(void *context, tt_session_id sid, int code) {
     NSString *engine = [self.resources stringByAppendingPathComponent:@"bin/tether"];
     if ([type isEqualToString:@"ready"]) {
         self.ready = YES;
+        if (self.smokePath && [NSProcessInfo.processInfo.environment[@"TETHER_APP_SMOKE_SMALL"] isEqual:@"1"])
+            [self.window setContentSize:NSMakeSize(680, 440)];
         NSMutableArray *fonts = [NSMutableArray arrayWithObjects:@"Tether Mono", @"Menlo", @"Monaco", nil];
         for (NSString *font in NSFontManager.sharedFontManager.availableFontFamilies)
             if ([font localizedCaseInsensitiveContainsString:@"mono"] || [font localizedCaseInsensitiveContainsString:@"nerd"])
@@ -226,6 +306,12 @@ static void on_exit(void *context, tt_session_id sid, int code) {
             (void)tt_orb_activity(&_orb, sid, [body[@"sequence"] unsignedLongLongValue], [body[@"phase"] UTF8String]);
     } else if ([type isEqualToString:@"tap"]) {
         if ([body[@"x"] isKindOfClass:NSNumber.class] && [body[@"y"] isKindOfClass:NSNumber.class]) (void)tt_orb_tap(&_orb, [body[@"x"] doubleValue], [body[@"y"] doubleValue]);
+    } else if ([type isEqualToString:@"appearance"]) {
+        self.window.appearance = [NSAppearance appearanceNamed:[body[@"light"] boolValue] ? NSAppearanceNameAqua : NSAppearanceNameDarkAqua];
+        NSString *hex = [body[@"background"] isKindOfClass:NSString.class] ? body[@"background"] : @"";
+        unsigned int rgb = 0;
+        if (hex.length == 7 && [hex hasPrefix:@"#"] && [[NSScanner scannerWithString:[hex substringFromIndex:1]] scanHexInt:&rgb])
+            self.window.backgroundColor = [NSColor colorWithSRGBRed:((rgb >> 16) & 255)/255.0 green:((rgb >> 8) & 255)/255.0 blue:(rgb & 255)/255.0 alpha:1];
     } else if ([type isEqualToString:@"orbPreference"]) {
         _orb.enabled = [body[@"enabled"] boolValue];
         if (!self.smokePath) [NSUserDefaults.standardUserDefaults setBool:!_orb.enabled forKey:@"disableThinkingLight"];
@@ -239,6 +325,8 @@ static void on_exit(void *context, tt_session_id sid, int code) {
             self.sessions[@(job)] = [@{@"job":@YES, @"request":request, @"buffer":[NSMutableData data], @"started":@(CACurrentMediaTime())} mutableCopy];
             if (save) { NSMutableData *line = [payload mutableCopy]; [line appendBytes:"\n" length:1]; (void)tt_runtime_write(_runtime, job, line.bytes, line.length); }
         } else [self reply:request result:nil error:error];
+    } else if ([type isEqualToString:@"files"]) {
+        [self readFiles:body request:request];
     } else if ([type isEqualToString:@"folder"]) {
         NSOpenPanel *panel = NSOpenPanel.openPanel; panel.canChooseDirectories = YES; panel.canChooseFiles = NO; panel.allowsMultipleSelection = NO;
         panel.directoryURL = [NSURL fileURLWithPath:self.cwd];
@@ -246,9 +334,46 @@ static void on_exit(void *context, tt_session_id sid, int code) {
             if (response == NSModalResponseOK) { self.cwd = panel.URL.path; [NSUserDefaults.standardUserDefaults setObject:self.cwd forKey:@"terminalDirectory"]; }
             [self reply:request result:self.cwd error:NULL];
         }];
+    } else if (([type isEqualToString:@"testDrag"] || [type isEqualToString:@"testRightClick"] || [type isEqualToString:@"testHover"]) && self.smokePath) {
+        // Native input regression only: route mouse events through Cocoa and
+        // WebKit, including hit testing and pointer capture (never DOM stubs).
+        BOOL rightClick = [type isEqualToString:@"testRightClick"];
+        BOOL hover = [type isEqualToString:@"testHover"];
+        NSArray *keys = rightClick || hover ? @[@"x", @"y"] : @[@"x", @"y", @"endX", @"endY"];
+        for (NSString *key in keys) {
+            if (![body[key] isKindOfClass:NSNumber.class]) { [self reply:request result:nil error:@"Invalid drag coordinate."]; return; }
+            double value = [body[key] doubleValue];
+            double limit = [key hasSuffix:@"X"] || [key isEqual:@"x"] ? self.web.bounds.size.width : self.web.bounds.size.height;
+            if (!isfinite(value) || value < 0 || value > limit) { [self reply:request result:nil error:@"Drag outside test window."]; return; }
+        }
+        for (NSInteger step = 0; step <= (hover ? 0 : rightClick ? 1 : 13); ++step) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(step * 0.025 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                double fraction = rightClick || hover ? 0 : MIN(1.0, (double)step / 12.0);
+                double x = [body[@"x"] doubleValue] + ([body[@"endX"] doubleValue] - [body[@"x"] doubleValue]) * fraction;
+                double y = [body[@"y"] doubleValue] + ([body[@"endY"] doubleValue] - [body[@"y"] doubleValue]) * fraction;
+                NSPoint point = [self.web convertPoint:NSMakePoint(x, self.web.isFlipped ? y : self.web.bounds.size.height - y) toView:nil];
+                NSEventType eventType = rightClick ? (step == 0 ? NSEventTypeRightMouseDown : NSEventTypeRightMouseUp) : step == 0 ? NSEventTypeLeftMouseDown : step == 13 ? NSEventTypeLeftMouseUp : NSEventTypeLeftMouseDragged;
+                if (hover) eventType = NSEventTypeMouseMoved;
+                if (hover) {
+                    self.window.acceptsMouseMovedEvents = YES;
+                    if (!self.testMovedMouse) {
+                        CGEventRef current = CGEventCreate(NULL);
+                        if (current) { self.testMousePosition = CGEventGetLocation(current); CFRelease(current); self.testMovedMouse = YES; }
+                    }
+                    NSPoint screen = [self.window convertPointToScreen:point];
+                    CGWarpMouseCursorPosition(CGPointMake(screen.x, NSScreen.screens.firstObject.frame.size.height - screen.y));
+                }
+                NSEvent *event = [NSEvent mouseEventWithType:eventType location:point modifierFlags:0 timestamp:NSProcessInfo.processInfo.systemUptime
+                    windowNumber:self.window.windowNumber context:nil eventNumber:step clickCount:1 pressure:step == 13 ? 0 : 1];
+                [NSApp postEvent:event atStart:NO];
+            });
+        }
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.55 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [self reply:request result:@YES error:nil];
+        });
     } else if ([type isEqualToString:@"snapshot"] && self.smokePath) {
         NSString *name = body[@"name"];
-        if ([@[@"terminal", @"btop", @"light"] containsObject:name]) {
+        if ([@[@"terminal", @"btop", @"light", @"explorer", @"themes"] containsObject:name]) {
             [self.web takeSnapshotWithConfiguration:nil completionHandler:^(NSImage *image, NSError *error) {
                 if (image && !error) {
                     NSBitmapImageRep *rep = [[NSBitmapImageRep alloc] initWithData:image.TIFFRepresentation];
@@ -281,6 +406,7 @@ static void on_exit(void *context, tt_session_id sid, int code) {
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)sender { (void)sender; return YES; }
 - (void)applicationWillTerminate:(NSNotification *)notification {
     (void)notification; self.stopping = YES; [self.timer invalidate];
+    if (self.testMovedMouse) CGWarpMouseCursorPosition(self.testMousePosition);
     if (_runtime) { tt_runtime_destroy(_runtime); _runtime = NULL; }
     [self.web.configuration.userContentController removeScriptMessageHandlerForName:@"tether"];
 }

@@ -389,6 +389,16 @@ size_t tt_runtime_live_count(const tt_runtime *runtime) {
     return count;
 }
 
+pid_t tt_runtime_foreground_pid(const tt_runtime *runtime, tt_session_id id) {
+    if (runtime == NULL || id == 0) return -1;
+    for (unsigned i = 0; i < TT_MAX_SESSIONS; ++i) {
+        const tt_session *session = &runtime->sessions[i];
+        if (session->id == id && session->pty && session->output_fd >= 0 && !session->closing)
+            return tcgetpgrp(session->output_fd);
+    }
+    return -1;
+}
+
 pid_t tt_runtime_child_pid(const tt_runtime *runtime, tt_session_id id) {
     if (runtime != NULL && id != 0)
         for (unsigned i = 0; i < TT_MAX_SESSIONS; ++i)

@@ -51,6 +51,8 @@ void tt_runtime_pump(tt_runtime *runtime, tt_output_fn output, tt_exit_fn exited
                      void *context);
 size_t tt_runtime_live_count(const tt_runtime *runtime);
 pid_t tt_runtime_child_pid(const tt_runtime *runtime, tt_session_id session);
+/* Foreground process group of a live PTY; -1 for pipes/unknown/closed panes. */
+pid_t tt_runtime_foreground_pid(const tt_runtime *runtime, tt_session_id session);
 
 /* Invoke before initializing AppKit/threads when argv[1] is --pty-child.
  * Private argv format is validated; exits 125 on setup failure, 127 on exec

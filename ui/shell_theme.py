@@ -6,7 +6,7 @@ from pathlib import Path
 import shutil
 import tempfile
 from dataclasses import replace
-from .theme_catalog import find_theme
+from .theme_catalog import BUNDLED_OMZ, find_theme
 
 THEMES = ("inherit", "minimal", "powerline", "custom")
 FONT_MODES = ("ascii", "powerline", "nerd")
@@ -115,11 +115,29 @@ class ShellTheme:
             choice = find_theme(self.theme)
             env["TETHER_ZSH_THEME_FILE"] = str(choice.path)
             env["TETHER_OMZ_ROOT"] = str(choice.framework)
+            env["TETHER_OMZ_BUNDLED"] = "1" if choice.framework == BUNDLED_OMZ else "0"
             # Usually the user's startup already loaded OMZ. For a fresh zsh
             # config, initialize the installed framework with private caches
             # and no plugins or automatic update checks.
             source = '''if (( ! $+functions[git_prompt_info] )); then
   ZSH="$TETHER_OMZ_ROOT"
+  if [[ $TETHER_OMZ_BUNDLED == 1 ]]; then
+    # Only load upstream prompt helpers. Theme selection must not install a
+    # framework, change aliases/history/key bindings, or run update scripts.
+    : ${ZSH_CUSTOM:=$ZSH/custom}
+    autoload -Uz colors add-zsh-hook
+    colors
+    : ${ZSH_THEME_GIT_PROMPT_PREFIX:='git:('}
+    : ${ZSH_THEME_GIT_PROMPT_SUFFIX:=')'}
+    : ${ZSH_THEME_GIT_PROMPT_DIRTY:='*'}
+    : ${ZSH_THEME_GIT_PROMPT_CLEAN:=''}
+    : ${ZSH_THEME_RUBY_PROMPT_PREFIX:='('}
+    : ${ZSH_THEME_RUBY_PROMPT_SUFFIX:=')'}
+    for _tether_lib in async_prompt bzr git nvm prompt_info_functions spectrum vcs_info; do
+      source "$ZSH/lib/$_tether_lib.zsh"
+    done
+    unset _tether_lib
+  else
   ZSH_THEME=''
   ZSH_CACHE_DIR="$TETHER_ZSH_BOOTSTRAP/cache"
   ZSH_COMPDUMP="$TETHER_ZSH_BOOTSTRAP/zcompdump"
@@ -128,6 +146,7 @@ class ShellTheme:
   zstyle ':omz:update' mode disabled
   plugins=()
   source "$ZSH/oh-my-zsh.sh"
+  fi
 fi
 autoload -Uz colors add-zsh-hook
 colors
@@ -143,7 +162,7 @@ if [[ ${functions[precmd]-} == "$_tether_old_precmd" && "${(j: :)precmd_function
   _tether_selected_prompt() { PROMPT=$_tether_theme_left; RPROMPT=$_tether_theme_right; setopt promptsubst; }
   add-zsh-hook precmd _tether_selected_prompt
 fi
-unset _tether_old_precmd _tether_old_hooks TETHER_ZSH_THEME_FILE TETHER_OMZ_ROOT
+unset _tether_old_precmd _tether_old_hooks TETHER_ZSH_THEME_FILE TETHER_OMZ_ROOT TETHER_OMZ_BUNDLED
 '''
         elif self.theme == "custom":
             # A filename is data, never shell syntax (including quotes/$/spaces).
