@@ -32,6 +32,26 @@ model server is needed to use the terminal.
   In short panes the Agent picker keeps its logo and moving light while trimming
   secondary text. btop's full dashboard needs at least 80 columns × 24 rows;
   maximize its pane or enlarge the app window if it shows a size message.
+- **New Window (⌘N)** in the Shell menu, or **New window** in the split menu,
+  opens another Tether window with its own session and panes. Windows share
+  the starting folder, settings, and the thinking light; closing a window
+  closes only its panes.
+- **Copying.** Highlighting text in a pane copies it to the pasteboard (turn
+  this off in Settings with *Copy text when you highlight it*). ⌘C, the Edit
+  menu, and the pane's right-click menu also copy, and ⌘V, Edit ▸ Paste, or
+  the right-click menu paste into the focused pane, even when keyboard focus
+  has drifted to a title bar or divider. Programs that own the mouse (tmux,
+  vim) take drag events; hold **⌥** while dragging to select locally instead.
+  Programs that set the clipboard with OSC 52 (tmux copy mode, vim, ssh
+  sessions) reach the pasteboard too.
+- **Saved shells (tmux).** Settings ▸ *Keep shells running between launches*
+  starts every new terminal pane inside a named session on Tether's private
+  tmux server (socket `tether`, not your own tmux). Quit the app or close a
+  window and those shells keep running; reopening Tether reattaches each one
+  in its own tab. Closing a pane with **×** or `exit` ends its session. tmux's
+  status line is off because Tether draws the panes; its prefix (Ctrl-B) and
+  mouse scrolling still work. Theme previews, Agent, and Monitor panes are
+  never saved. Requires tmux on the PATH (`brew install tmux`).
 - **⌘,** or the gear opens Settings. Search 142 included Oh My Zsh themes, your
   installed/custom themes, and the
   built-in prompts. **Preview theme** creates a disposable live shell pane without
@@ -316,6 +336,17 @@ Cocoa-injected events, not a physical mouse; they do not stub pointer capture.
 They also verify that Files starts closed and that its button closes both the
 browser and preview. The host accepts test mouse input only with the explicit
 `TETHER_APP_SMOKE_REPORT` test environment enabled.
+
+`--script NAME` runs any file from `native/tests` as the smoke, for one-off
+diagnostics without adding a flag.
+
+`--windows` writes a token to the pasteboard through the host and reads it
+back, highlights a printed line and checks that copy-on-select put exactly that
+text on the pasteboard, dispatches a paste event at the document and waits for
+the pasted command to run in the shell, then opens a second window and confirms
+the first window's shell still answers. Saved tmux sessions are covered by
+`tests/test_native_app.py`, which starts, detaches, lists, reattaches, and ends
+a session on a private socket without touching the user's tmux server.
 
 `--pane-controls` exercises native Cocoa right-clicks and title-bar drags,
 movement of existing Terminal/Agent/Monitor processes to all four edges, and

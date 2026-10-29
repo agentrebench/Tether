@@ -32,6 +32,8 @@ def main():
     parser.add_argument('--pane-controls', action='store_true', help='Check native right-click moves, title dragging, Agent resize and Explorer menus')
     parser.add_argument('--conversation', action='store_true', help='Check hover scrollbars and CLI conversation colors with a model-free PTY fixture')
     parser.add_argument('--workbench', action='store_true', help='Check source previews, layout and appearance')
+    parser.add_argument('--windows', action='store_true', help='Check a second window, pasteboard copy/paste and copy-on-select')
+    parser.add_argument('--script', help='Run this file from native/tests instead of a flag-selected smoke')
     parser.add_argument('--engine', type=Path, help='Use a frozen executable or unpacked engine directory instead of development Python')
     parser.add_argument('--packaged', action='store_true',
                         help='Test the signed app bundle as built, preserving its web assets and bundled engine')
@@ -60,7 +62,7 @@ def main():
                                              ('xterm', 'css/xterm.css', 'xterm.css'),
                                              ('addon-fit', 'lib/addon-fit.js', 'addon-fit.js')):
                 shutil.copy2(ROOT / f'desktop/node_modules/@xterm/{package}/{source}', vendor / target)
-        smoke = 'conversation_smoke.js' if args.conversation else 'pane_controls_smoke.js' if args.pane_controls else 'resize_smoke.js' if args.resize else 'panes_smoke.js' if args.panes else 'startup_smoke.js' if args.startup else 'agent_ui_smoke.js' if args.agent_ui else 'workbench_smoke.js' if args.workbench else 'theme_smoke.js' if args.themes else 'explorer_smoke.js'
+        smoke = args.script if args.script else 'windows_smoke.js' if args.windows else 'conversation_smoke.js' if args.conversation else 'pane_controls_smoke.js' if args.pane_controls else 'resize_smoke.js' if args.resize else 'panes_smoke.js' if args.panes else 'startup_smoke.js' if args.startup else 'agent_ui_smoke.js' if args.agent_ui else 'workbench_smoke.js' if args.workbench else 'theme_smoke.js' if args.themes else 'explorer_smoke.js'
         shutil.copy2(ROOT / 'native/tests' / smoke, web / 'explorer_smoke.js')
         if args.conversation:
             replay = json.loads((ROOT / 'native/tests/fixtures/cli_conversations.json').read_text())

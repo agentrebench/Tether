@@ -5,11 +5,16 @@ const $ = id => document.getElementById(id);
 const send = body => window.webkit.messageHandlers.tether.postMessage(body);
 const requests = new Map(), panes = new Map(), tabs = [];
 let requestID = 0, tabID = 0, activeTab, activePane, boot, settings, selectedTheme;
-let previewPane, previewSettings, orb, noticeTimer;
-let appearance = {font: 'Tether Mono', size: 14, theme:'tether'};
+let previewPane, previewSettings, orb, noticeTimer, windowCount = 1;
+let appearance = {font: 'Tether Mono', size: 14, theme:'tether', copyOnSelect:true, persist:false};
 try { Object.assign(appearance, JSON.parse(localStorage.getItem('appearance') || '{}')); } catch (_) {}
 if (!Number.isFinite(appearance.size) || appearance.size < 11 || appearance.size > 24) appearance.size = 14;
 if (typeof appearance.font !== 'string' || appearance.font.length > 120) appearance.font = 'Tether Mono';
+appearance.copyOnSelect=appearance.copyOnSelect!==false;appearance.persist=appearance.persist===true;
+const savePreferences=()=>{try{localStorage.setItem('appearance',JSON.stringify(appearance));}catch(_){}};
+// Saved shells are named tmux sessions on Tether's private server. Names are
+// plain tokens the host validates; they never carry user text.
+const sessionName=()=>'s'+Date.now().toString(36)+Math.random().toString(36).slice(2,7);
 if(!Object.hasOwn(appThemes,appearance.theme))appearance.theme='tether';
 let colors=applyAppTheme(appearance.theme,panes,send);
 function request(type, data = {}) {
@@ -56,7 +61,7 @@ function focusPane(pane) {
   activePane = pane;
   if (pane) pane.tab.activePane = pane;
   for (const item of panes.values()) item.element.classList.toggle('focused', item === pane);
-  $('terminal-status').textContent = pane ? (pane.kind === 'agent' ? 'Tether agent' : pane.kind === 'monitor' ? 'btop' : 'Shell') : '';
+  $('terminal-status').textContent = pane ? (pane.kind === 'agent' ? 'Tether agent' : pane.kind === 'monitor' ? 'btop' : pane.session ? 'Shell · saved (tmux)' : 'Shell') : '';
   updatePreview();
 }
 function selectTab(tab) {
@@ -120,6 +125,8 @@ function paneMenu(pane, event, anchor) {
   if(anchor?.getAttribute('aria-expanded')==='true'){dismissMenu();return;}
   const alone=[...panes.values()].filter(item=>item.tab===pane.tab).length<2;
   showMenu({label:'Pane actions',anchor,x:event?.clientX,y:event?.clientY,items:[
+    {id:'pane-copy',label:'Copy',disabled:!pane.term.hasSelection(),action:()=>{copySelection(pane);pane.term.focus();}},
+    {id:'pane-paste',label:'Paste',action:()=>attempt(async()=>{const text=await request('clipboardText');if(text)pane.term.paste(text);pane.term.focus();})},
     ...['left','right','up','down'].map(direction=>({id:'pane-move-'+direction,label:'Move '+direction,disabled:alone,action:()=>movePane(pane,direction)})),
     ...(pane.kind==='shell'?[{label:'Conversation colors…',action:()=>showMenu({label:'Conversation colors',anchor:pane.element.querySelector('.pane-menu'),items:[
       ...[['auto','Automatic (Claude / Codex)'],['claude','Claude Code'],['codex','Codex'],['off','Original CLI colors']].map(([value,label])=>({id:'chat-colors-'+value,label,checked:pane.conversation.mode===value,action:()=>{pane.conversation.setMode(value);pane.term.focus();}}))
@@ -165,8 +172,10 @@ function enablePaneDrag(pane, heading) {
   });
   pane.cancelDrag=()=>end();
 }
-async function openPane(kind = 'shell', split = 'auto', theme) {
+async function openPane(kind = 'shell', split = 'auto', theme, restore) {
   if (panes.size >= 14) throw new Error('Close a pane before opening another (14 panes maximum).');
+  // Theme previews are disposable; every other shell is saved when enabled.
+  const session = kind === 'shell' && !theme && (restore || (appearance.persist ? sessionName() : undefined));
   const target = split !== 'tab' && activePane;
   const dockMonitor = target && split === 'auto' && kind === 'monitor';
   let placement = target?.element, initial = .5;
@@ -192,13 +201,13 @@ async function openPane(kind = 'shell', split = 'auto', theme) {
       split = rect.width >= 600 ? 'right' : 'down';
     }
   }
-  const result = await request('open', {kind, ...(theme ? {theme} : {})});
+  const result = await request('open', {kind, ...(theme ? {theme} : {}), ...(session ? {session} : {})});
   const tab = target ? target.tab : makeTab(kind);
   const element = document.createElement('div'); element.className = 'pane';
   const heading = document.createElement('div'); heading.className = 'pane-heading';
   const title = document.createElement('span'); title.className = 'pane-title';
-  title.textContent = kind === 'agent' ? '✦ Agent' : kind === 'monitor' ? '▥ Monitor' : '⌘ Terminal';
-  heading.title='Drag to move · right-click for pane actions';
+  title.textContent = kind === 'agent' ? '✦ Agent' : kind === 'monitor' ? '▥ Monitor' : session ? '⌘ Terminal · saved' : '⌘ Terminal';
+  heading.title=session?'Kept running by tmux between launches · drag to move · right-click for pane actions':'Drag to move · right-click for pane actions';
   const menu=document.createElement('button');menu.className='pane-menu';menu.textContent='···';menu.title='Move or manage pane';menu.setAttribute('aria-label',menu.title);menu.setAttribute('aria-haspopup','menu');menu.setAttribute('aria-expanded','false');
   const maximize = document.createElement('button'); maximize.textContent = '□'; maximize.className = 'pane-maximize';
   maximize.title = 'Maximize pane'; maximize.setAttribute('aria-label', maximize.title); maximize.setAttribute('aria-pressed', 'false');
@@ -218,9 +227,20 @@ async function openPane(kind = 'shell', split = 'auto', theme) {
     group.divider=createDivider({container:group,first:placement,second:element,vertical:split==='down',initial,label:'Resize terminal panes',changed:scheduleFit});
   } else tab.element.append(element);
   const term = new Terminal({theme:colors,fontFamily:`"${appearance.font}", Menlo, monospace`,fontSize:appearance.size,
-    lineHeight:1.16,cursorBlink:true,cursorStyle:'bar',scrollback:5000,allowProposedApi:false,macOptionIsMeta:true});
+    lineHeight:1.16,cursorBlink:true,cursorStyle:'bar',scrollback:5000,allowProposedApi:false,macOptionIsMeta:true,
+    // Option-drag selects locally even when a program (tmux, vim) owns the mouse.
+    macOptionClickForcesSelection:true});
   const fit = new FitAddon.FitAddon(); term.loadAddon(fit); term.open(container);
-  const pane = {id:result.id,kind,term,fit,tab,element,title,maximize,closed:false}; panes.set(pane.id,pane);
+  const pane = {id:result.id,kind,term,fit,tab,element,title,maximize,closed:false,session:session||undefined}; panes.set(pane.id,pane);
+  // Highlighting copies: the selection reaches the pasteboard through the host,
+  // independent of which element has keyboard focus.
+  term.onSelectionChange(()=>{clearTimeout(pane.copyTimer);if(appearance.copyOnSelect&&term.hasSelection())pane.copyTimer=setTimeout(()=>copySelection(pane),150);});
+  term.parser.registerOscHandler(52,data=>{
+    // Programs inside the pane (tmux copy mode, vim, ssh) set the clipboard; queries are ignored.
+    const match=/^[cpqs0-7]*;([A-Za-z0-9+/=]{1,1400000})$/.exec(data);
+    if(match&&match[1]!=='?'){try{send({type:'clipboard',text:new TextDecoder().decode(Uint8Array.from(atob(match[1]),c=>c.charCodeAt(0)))});}catch(_){}}
+    return true;
+  });
   pane.conversation=createConversationColors(term,element);
   menu.onclick=event=>paneMenu(pane,event,menu);
   element.addEventListener('contextmenu',event=>paneMenu(pane,event),true);
@@ -262,6 +282,9 @@ function closePane(pane, notify = true) {
   if (pane.element.classList.contains('maximized-pane')) maximizePane(pane,false);
   if (pane === previewPane) { previewPane = null; previewSettings = null; }
   if (notify) send({type:'close',id:pane.id});
+  // Closing a saved pane ends its tmux session; quitting the app keeps it.
+  if (notify && pane.session) attempt(()=>request('endSession',{session:pane.session}));
+  clearTimeout(pane.copyTimer);
   panes.delete(pane.id); observer.unobserve(pane.element); pane.conversation.dispose();pane.term.dispose();detachPane(pane.element);
   if (![...panes.values()].some(p => p.tab === pane.tab)) {
     pane.tab.element.remove(); pane.tab.button.remove(); tabs.splice(tabs.indexOf(pane.tab),1);
@@ -303,7 +326,8 @@ async function showSettings() {
     $('font').replaceChildren();
     for (const family of boot.fonts) { const option = document.createElement('option'); option.value = family; option.textContent = family === 'Tether Mono' ? 'Tether Mono · Nerd Font included' : family; $('font').append(option); }
     $('font').value = appearance.font; $('font-size').value = appearance.size; $('font-size-label').textContent = `${appearance.size} px`;
-    $('orb-enabled').checked = boot.orbEnabled; renderThemes(); describeTheme();
+    $('orb-enabled').checked = boot.orbEnabled; $('copy-on-select').checked = appearance.copyOnSelect; $('persist-sessions').checked = appearance.persist;
+    renderThemes(); describeTheme();
     $('settings-status').textContent = 'Preview a theme before making it your default.';
   } catch(error) { $('settings-status').textContent = error.message; }
 }
@@ -314,8 +338,8 @@ function chosenSettings() {
     theme:selectedTheme,font:$('glyphs').value,theme_file:$('theme-file').value};
 }
 function saveAppearance() {
-  appearance = {...appearance,font:$('font').value || 'Tether Mono',size:Number($('font-size').value)};
-  try { localStorage.setItem('appearance',JSON.stringify(appearance)); } catch (_) {}
+  appearance = {...appearance,font:$('font').value || 'Tether Mono',size:Number($('font-size').value),copyOnSelect:$('copy-on-select').checked,persist:$('persist-sessions').checked};
+  savePreferences();
   boot.orbEnabled = $('orb-enabled').checked; send({type:'orbPreference',enabled:boot.orbEnabled});
   for (const pane of panes.values()) { pane.term.options.fontFamily = `"${appearance.font}", Menlo, monospace`; pane.term.options.fontSize = appearance.size; }
   fitAll();
@@ -355,7 +379,38 @@ $('orb').addEventListener('pointerdown',event => {const rect=$('orb').getBoundin
 $('catch-orb').onclick = () => {if(orb?.active)send({type:'tap',x:orb.x,y:orb.y});};
 $('hide-orb').onclick = () => {boot.orbEnabled=false;send({type:'orbPreference',enabled:false});};
 for(const [id,theme]of Object.entries(appThemes)){const option=document.createElement('option');option.value=id;option.textContent=theme.name;$('app-theme').append(option);}
-$('app-theme').onchange=()=>{appearance.theme=$('app-theme').value;colors=applyAppTheme(appearance.theme,panes,send);try{localStorage.setItem('appearance',JSON.stringify(appearance));}catch(_){};};
+$('app-theme').onchange=()=>{appearance.theme=$('app-theme').value;colors=applyAppTheme(appearance.theme,panes,send);savePreferences();};
+function copySelection(pane=activePane) {
+  const text=pane?.term.hasSelection()?pane.term.getSelection():'';
+  if(text)send({type:'clipboard',text});
+  return Boolean(text);
+}
+const inTextField=element=>element instanceof HTMLInputElement||element instanceof HTMLSelectElement||(element instanceof HTMLTextAreaElement&&!element.classList.contains('xterm-helper-textarea'));
+// Edit menu and ⌘C/⌘V reach the active pane even when focus drifted to a
+// heading, divider or the empty workspace. Form fields keep normal editing.
+document.addEventListener('copy',event=>{
+  if(event.defaultPrevented||inTextField(event.target)||!activePane?.term.hasSelection())return;
+  event.clipboardData.setData('text/plain',activePane.term.getSelection());event.preventDefault();
+});
+document.addEventListener('paste',event=>{
+  if(event.defaultPrevented||inTextField(event.target)||!activePane)return;
+  const text=event.clipboardData?.getData('text/plain');
+  if(text){event.preventDefault();activePane.term.paste(text);activePane.term.focus();}
+});
+// Reopen saved shells from the previous launch; otherwise start one shell.
+async function restoreSessions() {
+  if(appearance.persist&&!boot.smoke){
+    try{
+      const listing=await request('sessions');
+      if(listing.tmux===false)notice('Saved sessions need tmux: brew install tmux');
+      const names=(listing.sessions||[]).map(item=>item.name).filter(name=>/^[A-Za-z0-9_-]{1,32}$/.test(name)).slice(0,8);
+      let first=null;
+      for(const name of names){const pane=await openPane('shell','tab',undefined,name);first=first||pane;}
+      if(first){selectTab(first.tab);notice(`Restored ${names.length} saved shell${names.length>1?'s':''}.`);return first;}
+    }catch(error){notice(error.message);}
+  }
+  return openPane();
+}
 let layoutPrefs={};try{layoutPrefs=JSON.parse(localStorage.getItem('layout')||'{}')||{};}catch(_){}
 if(typeof layoutPrefs!=='object'||Array.isArray(layoutPrefs))layoutPrefs={};
 const persistLayout=(key,value)=>{layoutPrefs[key]=value;try{localStorage.setItem('layout',JSON.stringify(layoutPrefs));}catch(_){}};
@@ -384,7 +439,8 @@ async function chooseFolder() {
   boot.cwd = path; $('cwd').textContent = path; await explorer.setRoot(path);
   notice('New terminals will start in this folder.');
 }
-const actions = {files:()=>explorer.toggle(),new:()=>openPane(),agent:()=>openPane('agent'),monitor:()=>openPane('monitor'),split:()=>openPane('shell','right'),close:()=>closePane(activePane),settings:showSettings};
+const actions = {files:()=>explorer.toggle(),new:()=>openPane(),agent:()=>openPane('agent'),monitor:()=>openPane('monitor'),split:()=>openPane('shell','right'),close:()=>closePane(activePane),settings:showSettings,copy:()=>copySelection()};
+$('new-window').onclick=()=>{document.querySelector('.split-menu').open=false;send({type:'newWindow'});};
 for (const id of ['new','agent','monitor','settings','files']) $(id).onclick = () => attempt(actions[id]);
 $('empty-new').onclick = () => attempt(actions.new);
 for (const direction of ['right','down']) $('split-'+direction).onclick = () => {document.querySelector('.split-menu').open=false;attempt(()=>openPane('shell',direction));};
@@ -399,7 +455,8 @@ window.tetherReceive = event => {
   switch(event.type) {
     case 'program': panes.get(event.id)?.conversation.setProgram(event.program);break;
     case 'reply': {const pending=requests.get(event.request);if(pending){clearTimeout(pending.timer);requests.delete(event.request);event.ok?pending.resolve(event.result):pending.reject(new Error(event.error));}break;}
-    case 'bootstrap': boot=event;$('cwd').textContent=event.cwd;void explorer.setRoot(event.cwd);document.fonts.ready.then(()=>openPane()).then(pane=>{if(boot.smoke)runSmoke(pane);}).catch(error=>notice(error.message));break;
+    case 'bootstrap': boot=event;windowCount=event.windows||1;$('cwd').textContent=event.cwd;void explorer.setRoot(event.cwd);document.fonts.ready.then(()=>windowCount>1?openPane():restoreSessions()).then(pane=>{if(boot.smoke&&windowCount<=1)runSmoke(pane);}).catch(error=>notice(error.message));break;
+    case 'windows': windowCount=event.count;break;
     case 'output': {
       const bytes=Uint8Array.from(atob(event.data),c=>c.charCodeAt(0)),pane=panes.get(event.id);
       const ack=()=>send({type:'ack',id:event.id,bytes:bytes.length});if(pane)pane.term.write(bytes,ack);else ack();break;

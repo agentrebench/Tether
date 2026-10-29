@@ -2,7 +2,7 @@
 
 The macOS host keeps the existing Python agent engine, tools, knowledge model,
 sessions, and shell-theme support. Its private `tether native-app` command has
-four actions:
+six actions:
 
 - `settings`: one JSON line containing protocol `1`, `shell`, `theme`, `font`,
   `theme_file`, `home`, and `themes` (`id`, `name`, `source`). No credentials or
@@ -11,12 +11,23 @@ four actions:
   four string fields `shell`, `theme`, `font`, and `theme_file`. Reject duplicate
   or unknown keys and invalid values, save through the existing appearance
   helper, then return the settings object. It does not wait for input EOF.
-- `shell [--theme ID] [--cwd PATH]`: claim the supplied PTY, run a login shell
+- `shell [--theme ID] [--cwd PATH] [--tmux NAME]`: claim the supplied PTY, run a login shell
   in its own foreground process group, preserve existing startup files, and own
   the private theme directory until the shell exits. The theme override affects
   only that pane and never saves preferences. The host supplies bundled commands
   through PATH. HUP/TERM close the shell and its jobs; normal terminal Ctrl+C
   targets the foreground job. The native host must keep draining PTY output.
+  With `--tmux NAME` the pane attaches to session `NAME` on Tether's private
+  tmux server (`tmux -L tether`), creating it with the themed login shell when
+  it does not exist. Names are 1–32 characters from `[A-Za-z0-9_-]`; anything
+  else is rejected before tmux sees it. A hangup detaches the client and
+  leaves the session running. The private server configuration (written to a
+  temporary file, applied only when the server starts) keeps tmux's status line
+  off, enables mouse mode, and forwards copies as OSC 52.
+- `sessions`: one JSON line `{"protocol": 1, "tmux": bool, "sessions": [{"name", "cwd"}]}`
+  listing live sessions on the private server (at most 64, foreign names
+  filtered). `tmux` is false when the executable is missing.
+- `end-session --tmux NAME`: kill that session; replies `{"protocol": 1, "ended": bool}`.
 - `agent [--cwd PATH]`: claim the supplied PTY and enter the existing agent
   chooser followed by compact chat. Model selection, approvals, clarifying
   questions, cancellation, queueing, and persistence keep their existing behavior.

@@ -11,12 +11,21 @@
 #include <time.h>
 #include <libproc.h>
 
+// One display window: its own WebKit page and pane layout over the shared
+// runtime. Processes belong to the window that opened them.
+@interface TetherWindow : NSObject
+@property NSWindow *window;
+@property WKWebView *web;
+@property BOOL ready;
+@end
+@implementation TetherWindow
+@end
+
 @interface TetherHost : NSObject <NSApplicationDelegate, NSWindowDelegate, WKScriptMessageHandler, WKNavigationDelegate> {
     tt_runtime *_runtime;
     tt_orb _orb;
 }
-@property NSWindow *window;
-@property WKWebView *web;
+@property NSMutableArray<TetherWindow *> *windows;
 @property NSTimer *timer;
 @property NSMutableDictionary<NSNumber *, NSMutableDictionary *> *sessions;
 @property NSString *resources;
@@ -25,14 +34,15 @@
 @property BOOL ready;
 @property BOOL stopping;
 @property BOOL deliveredOrbActive;
-@property BOOL orbPending;
+@property NSUInteger orbPending;
 @property CFTimeInterval lastTick;
 @property CFTimeInterval lastProgramPoll;
 @property CGPoint testMousePosition;
 @property BOOL testMovedMouse;
 @property dispatch_queue_t fileQueue;
 @property NSUInteger pendingFiles;
-- (void)deliver:(NSDictionary *)event;
+- (void)deliver:(NSDictionary *)event to:(TetherWindow *)target;
+- (void)broadcast:(NSDictionary *)event;
 - (void)output:(tt_session_id)sid bytes:(const unsigned char *)bytes length:(size_t)length;
 - (void)exited:(tt_session_id)sid code:(int)code;
 @end
@@ -61,41 +71,77 @@ static void on_exit(void *context, tt_session_id sid, int code) {
     tt_orb_init(&_orb);
     _orb.reduced_motion = NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion;
     _orb.enabled = ![NSUserDefaults.standardUserDefaults boolForKey:@"disableThinkingLight"];
-    self.window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 1180, 780)
-        styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable
-        backing:NSBackingStoreBuffered defer:NO];
-    self.window.title = @"Tether";
-    self.window.minSize = NSMakeSize(680, 440);
-    self.window.delegate = self;
-    self.window.appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
-    self.window.backgroundColor = [NSColor colorWithSRGBRed:.047 green:.063 blue:.078 alpha:1];
-    self.window.tabbingMode = NSWindowTabbingModeDisallowed;
-    WKWebViewConfiguration *configuration = [WKWebViewConfiguration new];
-    if (self.smokePath) configuration.websiteDataStore = [WKWebsiteDataStore nonPersistentDataStore];
-    [configuration.userContentController addScriptMessageHandler:self name:@"tether"];
-    self.web = [[WKWebView alloc] initWithFrame:self.window.contentView.bounds configuration:configuration];
-    self.web.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
-    self.web.navigationDelegate = self;
-    [self.web setValue:@NO forKey:@"drawsBackground"];
-    self.window.contentView = self.web;
-    if (self.smokePath && [NSProcessInfo.processInfo.environment[@"TETHER_APP_SMOKE_SMALL"] isEqual:@"1"]) {
-        // Keep the test viewport fixed even if macOS restores/tiles the window.
-        NSView *fixture = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 680, 440)];
-        self.window.contentView = fixture;
-        self.web.autoresizingMask = NSViewNotSizable;
-        self.web.frame = NSMakeRect(0, 0, 680, 440);
-        [fixture addSubview:self.web];
-        [self.window setContentSize:NSMakeSize(680, 440)];
-    }
+    self.windows = [NSMutableArray array];
     [self installMenu];
-    NSURL *url = [NSURL fileURLWithPath:[self.resources stringByAppendingPathComponent:@"web/index.html"]];
-    [self.web loadFileURL:url allowingReadAccessToURL:[url URLByDeletingLastPathComponent]];
-    [self.window center]; [self.window makeKeyAndOrderFront:nil];
+    [self openWindow];
     [NSApp activateIgnoringOtherApps:YES];
     self.lastTick = CACurrentMediaTime();
     self.timer = [NSTimer timerWithTimeInterval:1.0/60 target:self selector:@selector(tick:) userInfo:nil repeats:YES];
     [NSRunLoop.mainRunLoop addTimer:self.timer forMode:NSRunLoopCommonModes];
 }
+- (TetherWindow *)openWindow {
+    TetherWindow *entry = [TetherWindow new];
+    NSWindow *window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 1180, 780)
+        styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable
+        backing:NSBackingStoreBuffered defer:NO];
+    window.title = @"Tether";
+    window.minSize = NSMakeSize(680, 440);
+    window.delegate = self;
+    window.appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
+    window.backgroundColor = [NSColor colorWithSRGBRed:.047 green:.063 blue:.078 alpha:1];
+    window.tabbingMode = NSWindowTabbingModeDisallowed;
+    window.releasedWhenClosed = NO;
+    WKWebViewConfiguration *configuration = [WKWebViewConfiguration new];
+    if (self.smokePath) configuration.websiteDataStore = [WKWebsiteDataStore nonPersistentDataStore];
+    [configuration.userContentController addScriptMessageHandler:self name:@"tether"];
+    WKWebView *web = [[WKWebView alloc] initWithFrame:window.contentView.bounds configuration:configuration];
+    web.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    web.navigationDelegate = self;
+    [web setValue:@NO forKey:@"drawsBackground"];
+    window.contentView = web;
+    if (self.smokePath && !self.windows.count && [NSProcessInfo.processInfo.environment[@"TETHER_APP_SMOKE_SMALL"] isEqual:@"1"]) {
+        // Keep the test viewport fixed even if macOS restores/tiles the window.
+        NSView *fixture = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 680, 440)];
+        window.contentView = fixture;
+        web.autoresizingMask = NSViewNotSizable;
+        web.frame = NSMakeRect(0, 0, 680, 440);
+        [fixture addSubview:web];
+        [window setContentSize:NSMakeSize(680, 440)];
+    }
+    NSURL *url = [NSURL fileURLWithPath:[self.resources stringByAppendingPathComponent:@"web/index.html"]];
+    [web loadFileURL:url allowingReadAccessToURL:[url URLByDeletingLastPathComponent]];
+    NSWindow *previous = self.windows.lastObject.window;
+    if (previous) [window cascadeTopLeftFromPoint:NSMakePoint(NSMinX(previous.frame) + 28, NSMaxY(previous.frame) - 28)];
+    else [window center];
+    entry.window = window; entry.web = web;
+    [self.windows addObject:entry];
+    [window makeKeyAndOrderFront:nil];
+    [self broadcast:@{@"type":@"windows", @"count":@(self.windows.count)}];
+    return entry;
+}
+- (TetherWindow *)entryForWebView:(WKWebView *)web {
+    for (TetherWindow *entry in self.windows) if (entry.web == web) return entry;
+    return nil;
+}
+- (TetherWindow *)entryForWindow:(NSWindow *)window {
+    for (TetherWindow *entry in self.windows) if (entry.window == window) return entry;
+    return nil;
+}
+- (TetherWindow *)keyEntry {
+    return [self entryForWindow:NSApp.keyWindow] ?: self.windows.firstObject;
+}
+- (void)windowWillClose:(NSNotification *)notification {
+    TetherWindow *entry = [self entryForWindow:notification.object];
+    if (!entry) return;
+    // Panes die with their window; saved tmux shells detach and keep running.
+    for (NSNumber *number in self.sessions.allKeys)
+        if (self.sessions[number][@"window"] == entry) tt_runtime_request_close(_runtime, number.unsignedLongLongValue);
+    entry.ready = NO;
+    [entry.web.configuration.userContentController removeScriptMessageHandlerForName:@"tether"];
+    [self.windows removeObject:entry];
+    [self broadcast:@{@"type":@"windows", @"count":@(self.windows.count)}];
+}
+- (void)newWindow:(id)sender { (void)sender; [self openWindow]; }
 - (void)installMenu {
     NSMenu *menu = [NSMenu new];
     NSMenuItem *app = [NSMenuItem new]; [menu addItem:app];
@@ -106,6 +152,7 @@ static void on_exit(void *context, tt_session_id sid, int code) {
     [app.submenu addItemWithTitle:@"Hide Tether" action:@selector(hide:) keyEquivalent:@"h"];
     [app.submenu addItemWithTitle:@"Quit Tether" action:@selector(terminate:) keyEquivalent:@"q"];
     NSMenuItem *shell = [NSMenuItem new]; [menu addItem:shell]; shell.submenu = [[NSMenu alloc] initWithTitle:@"Shell"];
+    NSMenuItem *window = [shell.submenu addItemWithTitle:@"New Window" action:@selector(newWindow:) keyEquivalent:@"n"]; window.target = self;
     for (NSArray *entry in @[@[@"New Terminal", @"new", @"t"], @[@"Split Right", @"split", @"d"],
                              @[@"Agent", @"agent", @""], @[@"btop Monitor", @"monitor", @""], @[@"Close Pane", @"close", @"w"]]) {
         NSMenuItem *item = [shell.submenu addItemWithTitle:entry[0] action:@selector(shellMenu:) keyEquivalent:entry[2]];
@@ -120,31 +167,34 @@ static void on_exit(void *context, tt_session_id sid, int code) {
     files.target = self; files.representedObject = @"files";
     NSApp.mainMenu = menu;
 }
-- (void)settingsMenu:(id)sender { (void)sender; [self deliver:@{@"type":@"menu", @"action":@"settings"}]; }
-- (void)shellMenu:(NSMenuItem *)sender { [self deliver:@{@"type":@"menu", @"action":sender.representedObject}]; }
-- (void)deliver:(NSDictionary *)event {
-    if (!self.ready || self.stopping) return;
+- (void)settingsMenu:(id)sender { (void)sender; [self deliver:@{@"type":@"menu", @"action":@"settings"} to:self.keyEntry]; }
+- (void)shellMenu:(NSMenuItem *)sender { [self deliver:@{@"type":@"menu", @"action":sender.representedObject} to:self.keyEntry]; }
+- (void)deliver:(NSDictionary *)event to:(TetherWindow *)target {
+    if (!target.ready || self.stopping) return;
     NSData *data = [NSJSONSerialization dataWithJSONObject:event options:0 error:NULL];
     if (!data) return;
     NSString *json = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
     BOOL isOrb = [event[@"type"] isEqual:@"orb"];
-    if (isOrb) self.orbPending = YES;
-    [self.web evaluateJavaScript:[NSString stringWithFormat:@"window.tetherReceive(%@)", json] completionHandler:^(id result, NSError *error) {
+    if (isOrb) ++self.orbPending;
+    [target.web evaluateJavaScript:[NSString stringWithFormat:@"window.tetherReceive(%@)", json] completionHandler:^(id result, NSError *error) {
         (void)result; (void)error;
-        if (isOrb) self.orbPending = NO;
+        if (isOrb && self.orbPending) --self.orbPending;
     }];
 }
-- (void)reply:(id)request result:(id)result error:(NSString *)error {
-    [self deliver:@{@"type":@"reply", @"request":request ?: @0, @"ok":@(error == nil),
-                   @"result":result ?: NSNull.null, @"error":error ?: @""}];
+- (void)broadcast:(NSDictionary *)event {
+    for (TetherWindow *entry in [self.windows copy]) [self deliver:event to:entry];
 }
-- (void)readFiles:(NSDictionary *)body request:(id)request {
+- (void)reply:(id)request result:(id)result error:(NSString *)error to:(TetherWindow *)target {
+    [self deliver:@{@"type":@"reply", @"request":request ?: @0, @"ok":@(error == nil),
+                   @"result":result ?: NSNull.null, @"error":error ?: @""} to:target];
+}
+- (void)readFiles:(NSDictionary *)body request:(id)request to:(TetherWindow *)target {
     NSString *path = [body[@"path"] isKindOfClass:NSString.class] ? body[@"path"] : nil;
     NSString *root = [self.cwd stringByResolvingSymlinksInPath];
     if (!path || [path lengthOfBytesUsingEncoding:NSUTF8StringEncoding] >= TT_FILE_PATH ||
         [path rangeOfString:[NSString stringWithFormat:@"%C", (unichar)0]].location != NSNotFound ||
         ![body[@"root"] isEqual:self.cwd] || self.pendingFiles >= 8) {
-        [self reply:request result:nil error:@"Folder changed or file browser is busy. Refresh and try again."]; return;
+        [self reply:request result:nil error:@"Folder changed or file browser is busy. Refresh and try again." to:target]; return;
     }
     BOOL hidden = [body[@"hidden"] isKindOfClass:NSNumber.class] && [body[@"hidden"] boolValue];
     ++self.pendingFiles;
@@ -174,7 +224,7 @@ static void on_exit(void *context, tt_session_id sid, int code) {
         free(file);
         dispatch_async(dispatch_get_main_queue(), ^{
             --self.pendingFiles;
-            [self reply:request result:result error:error];
+            [self reply:request result:result error:error to:target];
         });
     });
 }
@@ -212,7 +262,7 @@ static void on_exit(void *context, tt_session_id sid, int code) {
         tt_runtime_ack(_runtime, sid, length);
     } else {
         NSString *encoded = [[NSData dataWithBytes:bytes length:length] base64EncodedStringWithOptions:0];
-        [self deliver:@{@"type":@"output", @"id":@(sid), @"data":encoded}];
+        [self deliver:@{@"type":@"output", @"id":@(sid), @"data":encoded} to:session[@"window"]];
     }
 }
 - (void)exited:(tt_session_id)sid code:(int)code {
@@ -221,10 +271,10 @@ static void on_exit(void *context, tt_session_id sid, int code) {
     if (session[@"job"]) {
         id parsed = [NSJSONSerialization JSONObjectWithData:session[@"buffer"] options:0 error:NULL];
         NSDictionary *result = [parsed isKindOfClass:NSDictionary.class] ? parsed : nil;
-        NSString *error = session[@"overflow"] ? @"Settings response exceeded its limit." : (code ? result[@"error"] ?: @"Could not load shell settings." : nil);
-        if (![result isKindOfClass:NSDictionary.class]) { result = nil; error = @"Settings helper returned an invalid response."; }
-        [self reply:session[@"request"] result:result error:error];
-    } else [self deliver:@{@"type":@"exit", @"id":@(sid), @"code":@(code)}];
+        NSString *error = session[@"overflow"] ? @"Helper response exceeded its limit." : (code ? result[@"error"] ?: @"The terminal helper failed." : nil);
+        if (![result isKindOfClass:NSDictionary.class]) { result = nil; error = @"The terminal helper returned an invalid response."; }
+        [self reply:session[@"request"] result:result error:error to:session[@"window"]];
+    } else [self deliver:@{@"type":@"exit", @"id":@(sid), @"code":@(code)} to:session[@"window"]];
     [self.sessions removeObjectForKey:@(sid)];
 }
 - (void)tick:(NSTimer *)timer {
@@ -250,19 +300,34 @@ static void on_exit(void *context, tt_session_id sid, int code) {
                 ([process isEqual:@"codex"] || [process hasPrefix:@"codex-"]) ? @"codex" : @"";
             if (![session[@"program"] isEqual:program]) {
                 session[@"program"] = program;
-                [self deliver:@{@"type":@"program", @"id":number, @"program":program}];
+                [self deliver:@{@"type":@"program", @"id":number, @"program":program} to:session[@"window"]];
             }
         }
     }
     tt_orb_step(&_orb, now - self.lastTick); self.lastTick = now;
     if ((_orb.active || self.deliveredOrbActive) && !self.orbPending) {
-        [self deliver:@{@"type":@"orb", @"active":@(_orb.active), @"x":@(_orb.x), @"y":@(_orb.y), @"pulse":@(_orb.pulse), @"score":@(_orb.score), @"combo":@(_orb.combo), @"phase":_orb.phase == TT_REASONING ? @"Reasoning" : @"Thinking"}];
+        [self broadcast:@{@"type":@"orb", @"active":@(_orb.active), @"x":@(_orb.x), @"y":@(_orb.y), @"pulse":@(_orb.pulse), @"score":@(_orb.score), @"combo":@(_orb.combo), @"phase":_orb.phase == TT_REASONING ? @"Reasoning" : @"Thinking"}];
         self.deliveredOrbActive = _orb.active;
     }
+}
+- (BOOL)validSessionName:(NSString *)name {
+    if (![name isKindOfClass:NSString.class] || !name.length || name.length > 32) return NO;
+    NSCharacterSet *allowed = [NSCharacterSet characterSetWithCharactersInString:@"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"];
+    return [name rangeOfCharacterFromSet:allowed.invertedSet].location == NSNotFound;
+}
+// Short-lived Python helpers answer one JSON line; a reply reaches the window that asked.
+- (void)runJob:(NSArray<NSString *> *)arguments input:(NSData *)input request:(id)request to:(TetherWindow *)target {
+    NSString *error = nil;
+    tt_session_id job = [self spawn:arguments cwd:self.cwd pty:NO defer:NO error:&error];
+    if (!job) { [self reply:request result:nil error:error to:target]; return; }
+    self.sessions[@(job)] = [@{@"job":@YES, @"request":request, @"window":target, @"buffer":[NSMutableData data], @"started":@(CACurrentMediaTime())} mutableCopy];
+    if (input) { NSMutableData *line = [input mutableCopy]; [line appendBytes:"\n" length:1]; (void)tt_runtime_write(_runtime, job, line.bytes, line.length); }
 }
 - (void)userContentController:(WKUserContentController *)controller didReceiveScriptMessage:(WKScriptMessage *)message {
     (void)controller;
     if (!message.frameInfo.mainFrame || ![message.body isKindOfClass:NSDictionary.class]) return;
+    TetherWindow *target = [self entryForWebView:message.webView];
+    if (!target) return;
     NSDictionary *body = message.body;
     NSString *type = body[@"type"];
     if (![type isKindOfClass:NSString.class]) return;
@@ -271,30 +336,56 @@ static void on_exit(void *context, tt_session_id sid, int code) {
     tt_session_id sid = number.unsignedLongLongValue;
     NSString *engine = [self.resources stringByAppendingPathComponent:@"bin/tether"];
     if ([type isEqualToString:@"ready"]) {
-        self.ready = YES;
+        target.ready = YES;
         if (self.smokePath && [NSProcessInfo.processInfo.environment[@"TETHER_APP_SMOKE_SMALL"] isEqual:@"1"])
-            [self.window setContentSize:NSMakeSize(680, 440)];
+            [target.window setContentSize:NSMakeSize(680, 440)];
         NSMutableArray *fonts = [NSMutableArray arrayWithObjects:@"Tether Mono", @"Menlo", @"Monaco", nil];
         for (NSString *font in NSFontManager.sharedFontManager.availableFontFamilies)
             if ([font localizedCaseInsensitiveContainsString:@"mono"] || [font localizedCaseInsensitiveContainsString:@"nerd"])
                 if (![fonts containsObject:font] && fonts.count < 80) [fonts addObject:font];
-        [self deliver:@{@"type":@"bootstrap", @"cwd":self.cwd, @"fonts":fonts, @"orbEnabled":@(_orb.enabled), @"reducedMotion":@(_orb.reduced_motion), @"smoke":@(self.smokePath != nil)}];
+        [self deliver:@{@"type":@"bootstrap", @"cwd":self.cwd, @"fonts":fonts, @"orbEnabled":@(_orb.enabled), @"reducedMotion":@(_orb.reduced_motion), @"smoke":@(self.smokePath != nil), @"windows":@(self.windows.count)} to:target];
     } else if ([type isEqualToString:@"open"]) {
         NSString *kind = body[@"kind"];
-        if (![@[@"shell", @"agent", @"monitor"] containsObject:kind]) { [self reply:request result:nil error:@"Unknown terminal type."]; return; }
+        if (![@[@"shell", @"agent", @"monitor"] containsObject:kind]) { [self reply:request result:nil error:@"Unknown terminal type." to:target]; return; }
         NSMutableArray *args;
         if ([kind isEqualToString:@"monitor"]) args = [NSMutableArray arrayWithObject:[self.resources stringByAppendingPathComponent:@"bin/btop"]];
         else args = [NSMutableArray arrayWithArray:@[engine, @"native-app", kind, @"--cwd", self.cwd]];
         NSString *theme = [body[@"theme"] isKindOfClass:NSString.class] ? body[@"theme"] : nil;
         if (theme.length && [kind isEqualToString:@"shell"] && theme.length < 1024) [args addObjectsFromArray:@[@"--theme", theme]];
+        NSString *session = [body[@"session"] isKindOfClass:NSString.class] ? body[@"session"] : nil;
+        if (session) {
+            // Saved shells attach to a named tmux session; names are plain tokens.
+            if (![kind isEqualToString:@"shell"] || ![self validSessionName:session]) { [self reply:request result:nil error:@"Invalid saved session name." to:target]; return; }
+            [args addObjectsFromArray:@[@"--tmux", session]];
+        }
         NSString *error = nil;
         tt_session_id opened = [self spawn:args cwd:self.cwd pty:YES defer:![kind isEqualToString:@"monitor"] error:&error];
-        if (opened) self.sessions[@(opened)] = [@{@"kind":kind} mutableCopy];
-        [self reply:request result:@{@"id":@(opened), @"cwd":self.cwd} error:error];
+        if (opened) self.sessions[@(opened)] = [@{@"kind":kind, @"window":target} mutableCopy];
+        [self reply:request result:@{@"id":@(opened), @"cwd":self.cwd} error:error to:target];
+    } else if ([type isEqualToString:@"sessions"] || [type isEqualToString:@"endSession"]) {
+        NSArray *arguments = @[engine, @"native-app", @"sessions"];
+        if ([type isEqualToString:@"endSession"]) {
+            NSString *session = [body[@"session"] isKindOfClass:NSString.class] ? body[@"session"] : nil;
+            if (![self validSessionName:session]) { [self reply:request result:nil error:@"Invalid saved session name." to:target]; return; }
+            arguments = @[engine, @"native-app", @"end-session", @"--tmux", session];
+        }
+        [self runJob:arguments input:nil request:request to:target];
+    } else if ([type isEqualToString:@"clipboard"]) {
+        // Selected terminal text and OSC 52 copies land on the system pasteboard.
+        NSString *text = [body[@"text"] isKindOfClass:NSString.class] ? body[@"text"] : nil;
+        if (text.length && text.length <= 1024 * 1024) {
+            [NSPasteboard.generalPasteboard clearContents];
+            [NSPasteboard.generalPasteboard setString:text forType:NSPasteboardTypeString];
+        }
+    } else if ([type isEqualToString:@"clipboardText"]) {
+        NSString *text = [NSPasteboard.generalPasteboard stringForType:NSPasteboardTypeString] ?: @"";
+        [self reply:request result:text.length <= 1024 * 1024 ? text : @"" error:nil to:target];
+    } else if ([type isEqualToString:@"newWindow"]) {
+        [self openWindow];
     } else if ([type isEqualToString:@"input"]) {
         NSString *input = [body[@"data"] isKindOfClass:NSString.class] ? body[@"data"] : @"";
         NSData *data = [input dataUsingEncoding:NSUTF8StringEncoding];
-        if (!tt_runtime_write(_runtime, sid, data.bytes, data.length)) [self deliver:@{@"type":@"notice", @"message":@"Terminal input is busy; try a smaller paste."}];
+        if (!tt_runtime_write(_runtime, sid, data.bytes, data.length)) [self deliver:@{@"type":@"notice", @"message":@"Terminal input is busy; try a smaller paste."} to:target];
     } else if ([type isEqualToString:@"resize"]) {
         if ([body[@"cols"] isKindOfClass:NSNumber.class] && [body[@"rows"] isKindOfClass:NSNumber.class])
             (void)tt_runtime_resize(_runtime, sid, [body[@"cols"] unsignedIntValue], [body[@"rows"] unsignedIntValue]);
@@ -307,32 +398,27 @@ static void on_exit(void *context, tt_session_id sid, int code) {
     } else if ([type isEqualToString:@"tap"]) {
         if ([body[@"x"] isKindOfClass:NSNumber.class] && [body[@"y"] isKindOfClass:NSNumber.class]) (void)tt_orb_tap(&_orb, [body[@"x"] doubleValue], [body[@"y"] doubleValue]);
     } else if ([type isEqualToString:@"appearance"]) {
-        self.window.appearance = [NSAppearance appearanceNamed:[body[@"light"] boolValue] ? NSAppearanceNameAqua : NSAppearanceNameDarkAqua];
+        target.window.appearance = [NSAppearance appearanceNamed:[body[@"light"] boolValue] ? NSAppearanceNameAqua : NSAppearanceNameDarkAqua];
         NSString *hex = [body[@"background"] isKindOfClass:NSString.class] ? body[@"background"] : @"";
         unsigned int rgb = 0;
         if (hex.length == 7 && [hex hasPrefix:@"#"] && [[NSScanner scannerWithString:[hex substringFromIndex:1]] scanHexInt:&rgb])
-            self.window.backgroundColor = [NSColor colorWithSRGBRed:((rgb >> 16) & 255)/255.0 green:((rgb >> 8) & 255)/255.0 blue:(rgb & 255)/255.0 alpha:1];
+            target.window.backgroundColor = [NSColor colorWithSRGBRed:((rgb >> 16) & 255)/255.0 green:((rgb >> 8) & 255)/255.0 blue:(rgb & 255)/255.0 alpha:1];
     } else if ([type isEqualToString:@"orbPreference"]) {
         _orb.enabled = [body[@"enabled"] boolValue];
         if (!self.smokePath) [NSUserDefaults.standardUserDefaults setBool:!_orb.enabled forKey:@"disableThinkingLight"];
     } else if ([type isEqualToString:@"settings"] || [type isEqualToString:@"saveSettings"]) {
         BOOL save = [type isEqualToString:@"saveSettings"];
         NSData *payload = save && [body[@"settings"] isKindOfClass:NSDictionary.class] ? [NSJSONSerialization dataWithJSONObject:body[@"settings"] options:0 error:NULL] : nil;
-        if (save && (!payload || payload.length > 16000)) { [self reply:request result:nil error:@"Invalid settings."]; return; }
-        NSString *error = nil;
-        tt_session_id job = [self spawn:@[engine, @"native-app", save ? @"save-settings" : @"settings"] cwd:self.cwd pty:NO defer:NO error:&error];
-        if (job) {
-            self.sessions[@(job)] = [@{@"job":@YES, @"request":request, @"buffer":[NSMutableData data], @"started":@(CACurrentMediaTime())} mutableCopy];
-            if (save) { NSMutableData *line = [payload mutableCopy]; [line appendBytes:"\n" length:1]; (void)tt_runtime_write(_runtime, job, line.bytes, line.length); }
-        } else [self reply:request result:nil error:error];
+        if (save && (!payload || payload.length > 16000)) { [self reply:request result:nil error:@"Invalid settings." to:target]; return; }
+        [self runJob:@[engine, @"native-app", save ? @"save-settings" : @"settings"] input:payload request:request to:target];
     } else if ([type isEqualToString:@"files"]) {
-        [self readFiles:body request:request];
+        [self readFiles:body request:request to:target];
     } else if ([type isEqualToString:@"folder"]) {
         NSOpenPanel *panel = NSOpenPanel.openPanel; panel.canChooseDirectories = YES; panel.canChooseFiles = NO; panel.allowsMultipleSelection = NO;
         panel.directoryURL = [NSURL fileURLWithPath:self.cwd];
-        [panel beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse response) {
+        [panel beginSheetModalForWindow:target.window completionHandler:^(NSModalResponse response) {
             if (response == NSModalResponseOK) { self.cwd = panel.URL.path; [NSUserDefaults.standardUserDefaults setObject:self.cwd forKey:@"terminalDirectory"]; }
-            [self reply:request result:self.cwd error:NULL];
+            [self reply:request result:self.cwd error:NULL to:target];
         }];
     } else if (([type isEqualToString:@"testDrag"] || [type isEqualToString:@"testRightClick"] || [type isEqualToString:@"testHover"]) && self.smokePath) {
         // Native input regression only: route mouse events through Cocoa and
@@ -341,46 +427,46 @@ static void on_exit(void *context, tt_session_id sid, int code) {
         BOOL hover = [type isEqualToString:@"testHover"];
         NSArray *keys = rightClick || hover ? @[@"x", @"y"] : @[@"x", @"y", @"endX", @"endY"];
         for (NSString *key in keys) {
-            if (![body[key] isKindOfClass:NSNumber.class]) { [self reply:request result:nil error:@"Invalid drag coordinate."]; return; }
+            if (![body[key] isKindOfClass:NSNumber.class]) { [self reply:request result:nil error:@"Invalid drag coordinate." to:target]; return; }
             double value = [body[key] doubleValue];
-            double limit = [key hasSuffix:@"X"] || [key isEqual:@"x"] ? self.web.bounds.size.width : self.web.bounds.size.height;
-            if (!isfinite(value) || value < 0 || value > limit) { [self reply:request result:nil error:@"Drag outside test window."]; return; }
+            double limit = [key hasSuffix:@"X"] || [key isEqual:@"x"] ? target.web.bounds.size.width : target.web.bounds.size.height;
+            if (!isfinite(value) || value < 0 || value > limit) { [self reply:request result:nil error:@"Drag outside test window." to:target]; return; }
         }
         for (NSInteger step = 0; step <= (hover ? 0 : rightClick ? 1 : 13); ++step) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(step * 0.025 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 double fraction = rightClick || hover ? 0 : MIN(1.0, (double)step / 12.0);
                 double x = [body[@"x"] doubleValue] + ([body[@"endX"] doubleValue] - [body[@"x"] doubleValue]) * fraction;
                 double y = [body[@"y"] doubleValue] + ([body[@"endY"] doubleValue] - [body[@"y"] doubleValue]) * fraction;
-                NSPoint point = [self.web convertPoint:NSMakePoint(x, self.web.isFlipped ? y : self.web.bounds.size.height - y) toView:nil];
+                NSPoint point = [target.web convertPoint:NSMakePoint(x, target.web.isFlipped ? y : target.web.bounds.size.height - y) toView:nil];
                 NSEventType eventType = rightClick ? (step == 0 ? NSEventTypeRightMouseDown : NSEventTypeRightMouseUp) : step == 0 ? NSEventTypeLeftMouseDown : step == 13 ? NSEventTypeLeftMouseUp : NSEventTypeLeftMouseDragged;
                 if (hover) eventType = NSEventTypeMouseMoved;
                 if (hover) {
-                    self.window.acceptsMouseMovedEvents = YES;
+                    target.window.acceptsMouseMovedEvents = YES;
                     if (!self.testMovedMouse) {
                         CGEventRef current = CGEventCreate(NULL);
                         if (current) { self.testMousePosition = CGEventGetLocation(current); CFRelease(current); self.testMovedMouse = YES; }
                     }
-                    NSPoint screen = [self.window convertPointToScreen:point];
+                    NSPoint screen = [target.window convertPointToScreen:point];
                     CGWarpMouseCursorPosition(CGPointMake(screen.x, NSScreen.screens.firstObject.frame.size.height - screen.y));
                 }
                 NSEvent *event = [NSEvent mouseEventWithType:eventType location:point modifierFlags:0 timestamp:NSProcessInfo.processInfo.systemUptime
-                    windowNumber:self.window.windowNumber context:nil eventNumber:step clickCount:1 pressure:step == 13 ? 0 : 1];
+                    windowNumber:target.window.windowNumber context:nil eventNumber:step clickCount:1 pressure:step == 13 ? 0 : 1];
                 [NSApp postEvent:event atStart:NO];
             });
         }
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.55 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            [self reply:request result:@YES error:nil];
+            [self reply:request result:@YES error:nil to:target];
         });
     } else if ([type isEqualToString:@"snapshot"] && self.smokePath) {
         NSString *name = body[@"name"];
         if ([@[@"terminal", @"btop", @"light", @"explorer", @"themes"] containsObject:name]) {
-            [self.web takeSnapshotWithConfiguration:nil completionHandler:^(NSImage *image, NSError *error) {
+            [target.web takeSnapshotWithConfiguration:nil completionHandler:^(NSImage *image, NSError *error) {
                 if (image && !error) {
                     NSBitmapImageRep *rep = [[NSBitmapImageRep alloc] initWithData:image.TIFFRepresentation];
                     NSString *path = [NSString stringWithFormat:@"%@.%@.png", self.smokePath, name];
                     [[rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}] writeToFile:path atomically:YES];
                 }
-                [self reply:request result:@(image != nil && error == nil) error:nil];
+                [self reply:request result:@(image != nil && error == nil) error:nil to:target];
             }];
         }
     } else if ([type isEqualToString:@"smoke"]) {
@@ -388,7 +474,7 @@ static void on_exit(void *context, tt_session_id sid, int code) {
         if (self.smokePath && [body[@"result"] isKindOfClass:NSDictionary.class]) {
             NSData *data = [NSJSONSerialization dataWithJSONObject:body[@"result"] options:NSJSONWritingPrettyPrinted error:NULL];
             [data writeToFile:self.smokePath atomically:YES];
-            [self.web takeSnapshotWithConfiguration:nil completionHandler:^(NSImage *image, NSError *error) {
+            [target.web takeSnapshotWithConfiguration:nil completionHandler:^(NSImage *image, NSError *error) {
                 if (image && !error) { NSBitmapImageRep *rep = [[NSBitmapImageRep alloc] initWithData:image.TIFFRepresentation];
                     [[rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}] writeToFile:[self.smokePath stringByAppendingString:@".png"] atomically:YES]; }
                 [NSApp terminate:nil];
@@ -408,7 +494,7 @@ static void on_exit(void *context, tt_session_id sid, int code) {
     (void)notification; self.stopping = YES; [self.timer invalidate];
     if (self.testMovedMouse) CGWarpMouseCursorPosition(self.testMousePosition);
     if (_runtime) { tt_runtime_destroy(_runtime); _runtime = NULL; }
-    [self.web.configuration.userContentController removeScriptMessageHandlerForName:@"tether"];
+    for (TetherWindow *entry in self.windows) [entry.web.configuration.userContentController removeScriptMessageHandlerForName:@"tether"];
 }
 @end
 

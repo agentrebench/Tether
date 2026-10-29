@@ -5,7 +5,7 @@
 <body>
 <header class="toolbar"><div class="brand"><span class="brand-mark">◈</span> tether</div><div class="tabs" id="tabs" role="tablist"></div>
 <div class="actions"><button id="new" title="New terminal pane · ⌘T" aria-label="New terminal pane">＋</button><button id="files" title="Open or close files · ⌘B" aria-label="Open or close files" aria-pressed="false">Files</button><button id="agent" title="Open an Agent pane in this session"><span>✦</span> Agent</button><button id="monitor" title="Open a Monitor pane in this session"><span>▥</span> Monitor</button>
-<details class="split-menu"><summary title="Split terminal" aria-label="Split terminal">◫</summary><div><button id="split-right">Split right <kbd>⌘D</kbd></button><button id="split-down">Split down</button></div></details>
+<details class="split-menu"><summary title="Split terminal or open a window" aria-label="Split terminal or open a window">◫</summary><div><button id="split-right">Split right <kbd>⌘D</kbd></button><button id="split-down">Split down</button><button id="new-window">New window <kbd>⌘N</kbd></button></div></details>
 <button id="settings" title="Settings · ⌘," aria-label="Settings">⚙</button></div></header>
 <div id="preview-bar" class="preview-bar" hidden><span id="preview-name"></span><span>Try this theme in a real shell.</span><button id="use-theme">Use theme</button><button id="browse-themes">Browse themes</button></div>
 <div class="workbench">
@@ -20,7 +20,9 @@
 <label for="font">Terminal font</label><select id="font"></select><label for="font-size">Text size <output id="font-size-label">14 px</output></label><input id="font-size" type="range" min="11" max="24" value="14">
 <label for="glyphs">Built-in prompt glyphs</label><select id="glyphs"><option value="ascii">ASCII</option><option value="powerline">Powerline</option><option value="nerd">Nerd Font</option></select>
 <label id="theme-file-label" for="theme-file" hidden>Custom zsh theme file</label><input id="theme-file" placeholder="~/.config/zsh/theme.zsh" hidden>
-<label class="check"><input id="orb-enabled" type="checkbox" checked> Interactive thinking light</label><p class="subtle">Catch it while an agent thinks. It never captures your terminal keys.</p></section></div>
+<label class="check"><input id="orb-enabled" type="checkbox" checked> Interactive thinking light</label><p class="subtle">Catch it while an agent thinks. It never captures your terminal keys.</p>
+<label class="check"><input id="copy-on-select" type="checkbox" checked> Copy text when you highlight it</label><p class="subtle">⌘C, the Edit menu and right-click also copy. Hold ⌥ to select inside tmux or vim.</p>
+<label class="check"><input id="persist-sessions" type="checkbox"> Keep shells running between launches (tmux)</label><p class="subtle">New terminals run in named tmux sessions and come back when you reopen Tether. Closing a pane ends its session. Needs tmux installed.</p></section></div>
 <div class="dialog-bottom"><p id="settings-status">Preview a theme before making it your default.</p><div><button id="cancel-settings">Cancel</button><button id="preview-theme">Preview theme</button><button id="save-settings" class="primary">Save & open</button></div></div></dialog>
 <script src="vendor/xterm.js"></script><script src="vendor/addon-fit.js"></script><script src="vendor/highlight-source.js"></script><script src="source.js"></script><script src="appearance.js"></script><script src="layout.js"></script><script src="explorer.js"></script><script src="conversation.js"></script><script src="app.js"></script>
 </body></html>

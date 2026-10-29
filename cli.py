@@ -2091,8 +2091,9 @@ def build_parser() -> argparse.ArgumentParser:
     theme_parser.add_argument("--file", help="Local zsh theme file for the custom theme")
 
     native_parser = subparsers.add_parser("native-app", help=argparse.SUPPRESS)
-    native_parser.add_argument("action", choices=["settings", "save-settings", "shell", "agent"])
+    native_parser.add_argument("action", choices=["settings", "save-settings", "shell", "agent", "sessions", "end-session"])
     native_parser.add_argument("--theme", help=argparse.SUPPRESS)
+    native_parser.add_argument("--tmux", dest="session", help=argparse.SUPPRESS)
     native_parser.add_argument("--cwd", help=argparse.SUPPRESS)
 
     shell_parser = subparsers.add_parser("terminal-shell", help=argparse.SUPPRESS)

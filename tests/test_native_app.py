@@ -7,9 +7,11 @@ import json
 import os
 from pathlib import Path
 import select
+import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -273,3 +275,98 @@ def test_native_save_settings_roundtrip_without_closing_input(tmp_path):
         child.stdin.close()
         child.stdout.close()
         child.stderr.close()
+
+
+@pytest.mark.parametrize("action", ["sessions", "end-session"])
+def test_native_session_parser(action):
+    args = build_parser().parse_args(["native-app", action, "--tmux", "s-1_x"])
+    assert args.action == action and args.session == "s-1_x"
+    assert build_parser().parse_args(["native-app", "shell"]).session is None
+
+
+@pytest.mark.parametrize("name", ["", "a.b", "a:b", "a b", "x" * 33, None, 7])
+def test_session_names_reject_target_syntax(name):
+    with pytest.raises(ValueError):
+        native_app.validate_session(name)
+
+
+def test_sessions_listing_without_tmux_is_empty_and_filters_foreign_names(monkeypatch):
+    monkeypatch.setattr(native_app.shutil, "which", lambda _: None)
+    assert native_app.list_sessions() == {"protocol": 1, "tmux": False, "sessions": []}
+    with pytest.raises(ValueError):
+        native_app.end_session("gone")
+    monkeypatch.setattr(native_app.shutil, "which", lambda _: "/usr/bin/tmux")
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(returncode=0, stdout="keep-1\t/work\nodd.name\t/x\n" + "n" * 40 + "\t/y\n", stderr="")
+    monkeypatch.setattr(native_app.subprocess, "run", fake_run)
+    monkeypatch.delenv("TETHER_TMUX_SOCKET", raising=False)
+    assert native_app.list_sessions()["sessions"] == [{"name": "keep-1", "cwd": "/work"}]
+    assert calls[-1][:3] == ["/usr/bin/tmux", "-L", "tether"]
+    assert native_app.end_session("keep-1") == {"protocol": 1, "ended": True}
+    assert calls[-1][3:] == ["kill-session", "-t", "=keep-1"]
+
+
+@pytest.mark.skipif(not native_app.tmux_executable(), reason="tmux is not installed")
+def test_native_saved_session_survives_hangup_and_reattaches(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".zshrc").write_text("export NATIVE_STARTUP_CHECK=preserved\n")
+    # Unix socket paths are limited to about 100 bytes; pytest's tmp_path is longer.
+    socket_dir = Path(tempfile.mkdtemp(prefix="tt-", dir="/tmp"))
+    socket = socket_dir / "s"
+    env = dict(os.environ, HOME=str(home), ZDOTDIR=str(home), TMPDIR=str(tmp_path),
+               TETHER_CONFIG_DIR=str(tmp_path / "config"), TETHER_TMUX_SOCKET=str(socket),
+               TERM="xterm-256color", PYTHONPATH=str(Path(__file__).resolve().parents[2]))
+    env.pop("TMUX", None)
+    command = [sys.executable, "-m", "tether", "native-app", "shell", "--theme", "minimal",
+               "--cwd", str(home), "--tmux", "keep-1"]
+
+    def helper(*actions):
+        result = subprocess.run([sys.executable, "-m", "tether", "native-app", *actions],
+                                env=env, capture_output=True, text=True, timeout=10, check=True)
+        return json.loads(result.stdout)
+
+    def attach():
+        master, slave = os.openpty()
+        child = subprocess.Popen(command, stdin=slave, stdout=slave, stderr=slave, env=env, start_new_session=True)
+        os.close(slave)
+        return child, master
+
+    def hangup(child, master):
+        if child.poll() is None:
+            os.kill(child.pid, signal.SIGHUP)
+        deadline = time.monotonic() + 5
+        while child.poll() is None and time.monotonic() < deadline:
+            if select.select([master], [], [], 0.05)[0]:
+                try:
+                    os.read(master, 65536)
+                except OSError:
+                    break
+        os.close(master)
+        return child.wait(timeout=2)
+
+    child, master = attach()
+    try:
+        os.write(master, b"printf '\\nFIRST:%s:%s\\n' \"$NATIVE_STARTUP_CHECK\" \"${TMUX:+tmux}\"; export NATIVE_MARK=kept\n")
+        _read_until(master, b"FIRST:preserved:tmux")
+        assert hangup(child, master) >= 0
+        listing = helper("sessions")
+        assert listing["tmux"] is True
+        assert listing["sessions"] == [{"name": "keep-1", "cwd": str(home)}]
+        child, master = attach()
+        os.write(master, b"printf '\\nAGAIN:%s\\n' \"$NATIVE_MARK\"\n")
+        _read_until(master, b"AGAIN:kept")
+        assert hangup(child, master) >= 0
+        assert helper("end-session", "--tmux", "keep-1") == {"protocol": 1, "ended": True}
+        assert helper("sessions")["sessions"] == []
+        assert not list(tmp_path.glob("tether-tmux-*")), "private tmux configuration was not cleaned up"
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=5)
+        subprocess.run([native_app.tmux_executable(), "-S", str(socket), "kill-server"],
+                       capture_output=True, timeout=5)
+        shutil.rmtree(socket_dir, ignore_errors=True)

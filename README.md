@@ -133,6 +133,10 @@ an interactive light appears while they think. **⌘,** opens Settings.
 Right-click any pane or use its **···** menu to move it left, right, up, or down.
 Drag a pane's title bar onto another pane's edge to dock it there. Explorer's
 **···** opens its folder, refresh, hidden-file, collapse, and close actions.
+Open more windows with **⌘N**. Highlighting text copies it, and ⌘C/⌘V, the Edit
+menu, and the pane's right-click menu copy and paste regardless of focus. Turn on
+**Keep shells running between launches** in Settings to run new terminals in
+named tmux sessions that survive quitting the app and reattach on the next launch.
 Hover at a terminal's right edge to reveal its scrollback bar. Claude Code and
 Codex conversations can follow the app theme: recognized assistant prose uses
 the accent color and human text uses the foreground color. The pane menu lets
