@@ -505,9 +505,10 @@ def context_indicator(engine: QueryEngine, config: TetherConfig) -> str:
 
 
 class TetherREPL:
-    def __init__(self, config: TetherConfig, *, plain: bool = False):
+    def __init__(self, config: TetherConfig, *, plain: bool = False, compact: bool = False):
         self.config = config
-        self._plain = plain
+        self._plain = plain or compact
+        self._compact = compact
         from .native_activity import NativeActivity
         self._native_activity = NativeActivity()
         self._workspace = None
@@ -582,6 +583,17 @@ class TetherREPL:
             "bottom-toolbar": "noreverse noinherit #6c7086",
             "frame.border": "#585b70",  # muted single-line input frame
         })
+        if compact:
+            self._toolbar_style = Style.from_dict({
+                "": "bg:default default",
+                "bottom-toolbar": "noreverse ansibrightblack",
+                "frame.border": "ansibrightblack",
+                "placeholder": "ansibrightblack",
+                "completion-menu.completion": "bg:default default",
+                "completion-menu.completion.current": "bg:default ansicyan bold underline",
+                "completion-menu.meta.completion": "bg:default ansibrightblack",
+                "completion-menu.meta.completion.current": "bg:default ansicyan",
+            })
         try:
             CONFIG_DIR.mkdir(parents=True, exist_ok=True)
             history = FileHistory(str(CONFIG_DIR / "history"))
@@ -645,7 +657,8 @@ class TetherREPL:
         """Run the REPL. ``resume`` restores a saved conversation first:
         "@latest" (or "") from --continue picks the most recent session,
         anything else is treated as a session id."""
-        print_banner(compact=self._workspace is not None)
+        if not getattr(self, "_compact", False):
+            print_banner(compact=self._workspace is not None)
 
         backend = InferenceBackend(self.config)
         if not backend.health_check():
@@ -2055,10 +2068,12 @@ class TetherREPL:
         if n_tools:
             bits.append(f"{n_tools} tool{'s' if n_tools != 1 else ''}")
 
-        # A hairline rule closes the turn: "─ 4.2s · 1.2k tok · 3 tools ───────"
-        label = f"─ {' · '.join(bits)} "
-        fill = max(0, term_width() - len(label))
-        print(f"{DIM}{label}{'─' * fill}{RESET}")
+        if getattr(self, "_compact", False):
+            print(dim("  " + " · ".join(bits)))
+        else:
+            label = f"─ {' · '.join(bits)} "
+            fill = max(0, term_width() - len(label))
+            print(f"{DIM}{label}{'─' * fill}{RESET}")
 
         if result.stop_reason not in ("completed", "cancelled"):
             print(f"  {warning(result.stop_reason)}")
@@ -2202,6 +2217,15 @@ class TetherREPL:
 
     def _print_welcome(self, time_greeting: str) -> None:
         cwd = self._home_abbrev(os.getcwd())
+        if getattr(self, "_compact", False):
+            from .workspace import provider_identity
+            _, provider, _ = provider_identity(self.config.provider)
+            print(f"\n  {CYAN}◇{RESET} {BOLD}tether{RESET} {dim('/ ' + provider)}")
+            print(dim(f"  {cwd}"))
+            print(f"\n  {BOLD}What would you like to work on?{RESET}")
+            print(dim("  /help commands  ·  /plan plan first  ·  /resume continue"))
+            print()
+            return
         if self.config.is_remote:
             model = self.config.api_model or self.config.provider
         else:
@@ -2213,7 +2237,9 @@ class TetherREPL:
         print(f"  {dim('/help commands · /plan plan first · /resume continue a past chat')}")
         print()
 
-    def _bottom_toolbar(self, engine: QueryEngine) -> HTML:
+    def _bottom_toolbar(self, engine: QueryEngine):
+        if getattr(self, "_compact", False):
+            return self._compact_status(engine)
         cwd = self._home_abbrev(os.getcwd())
         estimated_tokens = engine._estimate_message_tokens()
         max_tokens = self.config.context_size
@@ -2237,10 +2263,31 @@ class TetherREPL:
             parts.insert(0, "<style fg='#c6a0f6'><b>PLAN</b></style>")
         return HTML("  ·  ".join(parts))
 
+    def _compact_status(self, engine: QueryEngine):
+        """Plain fragments keep model names literal and use the terminal palette."""
+        import shutil
+        model = (self.config.api_model or self.config.provider) if self.config.is_remote else (
+            Path(self.config.model_path).stem if self.config.model_path else "local model")
+        pct = min(100, int(engine._estimate_message_tokens() / max(1, self.config.context_size) * 100))
+        _, choices, effort = reasoning_setting(self.config)
+        parts = [model]
+        if choices or effort != "default":
+            parts.append(effort)
+        parts.append(f"{pct}% context")
+        if getattr(engine, "plan_mode", False):
+            parts.insert(0, "PLAN")
+        width = shutil.get_terminal_size().columns
+        label = "  " + " · ".join(parts)
+        hint = "    Enter send · Alt+Enter newline"
+        if len(label + hint) < width:
+            label += hint
+        return [("class:bottom-toolbar", label)]
+
     def _read_input(self, engine: QueryEngine) -> str:
-        """Read one submission inside a bordered input box — a double-line frame
-        that hugs the input and grows with it (the harness-style input frame),
-        with the status bar just beneath it.
+        """Read a submission with completion, history and multiline paste support.
+
+        Compact chat has a content-sized composer capped at eight rows; explicit
+        plain mode retains its original frame. Status appears below the input.
 
         Fully isolated and guarded: completion (the `/` menu), history,
         auto-suggest and the enter/paste key handling are all preserved, and ANY
@@ -2262,7 +2309,8 @@ class TetherREPL:
                                                         FormattedTextControl)
             from prompt_toolkit.layout.dimension import Dimension
             from prompt_toolkit.layout.menus import CompletionsMenu
-            from prompt_toolkit.layout.processors import BeforeInput
+            from prompt_toolkit.layout.processors import AfterInput, BeforeInput, ConditionalProcessor
+            from prompt_toolkit.filters import Condition
 
             buf = Buffer(
                 completer=TetherCompleter(skill_store=self.skill_store, config=self.config),
@@ -2310,13 +2358,21 @@ class TetherREPL:
                 if not buf.text:
                     event.app.exit(exception=EOFError)
 
+            compact = getattr(self, "_compact", False)
             border = "class:frame.border"
+            processors = [BeforeInput(ANSI(self._prompt(engine)))]
+            if compact:
+                processors.append(ConditionalProcessor(
+                    AfterInput([("class:placeholder", "Ask Tether to build, fix, or explain…")]),
+                    Condition(lambda: not buf.text),
+                ))
             input_window = Window(
                 BufferControl(
                     buffer=buf,
-                    input_processors=[BeforeInput(ANSI(self._prompt(engine)))],
+                    input_processors=processors,
                 ),
-                height=Dimension(min=1),
+                height=Dimension(min=1, max=8) if compact else Dimension(min=1),
+                dont_extend_height=compact,
                 wrap_lines=True,
             )
 
@@ -2335,6 +2391,8 @@ class TetherREPL:
                 VSplit([vbar(), input_window, vbar()]),
                 VSplit([corner("╰"), hbar(), corner("╯")]),
             ])
+            if compact:
+                box = HSplit([hbar(), input_window, Window(height=1)])
             status = Window(
                 FormattedTextControl(lambda: self._bottom_toolbar(engine)),
                 height=1, style="class:bottom-toolbar",
@@ -2350,8 +2408,16 @@ class TetherREPL:
                 style=self._toolbar_style,
                 full_screen=False,
                 mouse_support=False,
+                erase_when_done=compact,
             )
-            result = app.run()
+            from .native_resize import NativeResize
+            resize = NativeResize(app, kb, enabled=None if compact else False)
+            try:
+                result = app.run()
+            finally:
+                resize.close()
+            if compact and result and result.strip():
+                print(f"\n  {CYAN}›{RESET} " + result.replace("\n", "\n    ") + "\n")
             return result if result is not None else ""
         except (EOFError, KeyboardInterrupt):
             raise
@@ -2363,6 +2429,8 @@ class TetherREPL:
             )
 
     def _prompt(self, engine: QueryEngine) -> str:
+        if getattr(self, "_compact", False):
+            return f"  {CYAN}›{RESET} "
         ctx = context_indicator(engine, self.config)
         cwd_name = os.path.basename(os.getcwd()) or os.getcwd()
         plan = f" {MAGENTA}{BOLD}[PLAN]{RESET}" if getattr(engine, "plan_mode", False) else ""

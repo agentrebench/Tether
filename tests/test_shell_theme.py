@@ -139,6 +139,7 @@ def test_real_themed_pty_survives_existing_prompt_hooks_and_cleans_up(monkeypatc
 
     monkeypatch.setenv("ZDOTDIR", str(tmp_path))
     monkeypatch.setenv("TETHER_CONFIG_DIR", str(tmp_path / "config"))
+    (tmp_path / ".zshenv").write_text("unsetopt GLOBAL_RCS\n")
     (tmp_path / ".zshrc").write_text("precmd() { PROMPT='OLD-THEME '; }\n")
 
     async def check():

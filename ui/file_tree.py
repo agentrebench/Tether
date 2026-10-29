@@ -3,9 +3,33 @@ from __future__ import annotations
 
 import os
 import stat
+from contextlib import contextmanager
 from dataclasses import dataclass
 from itertools import islice
 from pathlib import Path
+
+
+@contextmanager
+def _scoped_open(root: Path, path: Path, directory=False):
+    """Walk from an open root without following replaced directories/symlinks."""
+    parts = path.relative_to(root).parts
+    if ".." in parts:
+        raise ValueError("Path is outside the selected folder")
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for i, part in enumerate(parts):
+            flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+            if directory or i < len(parts) - 1:
+                flags |= os.O_DIRECTORY
+            mode = os.stat(part, dir_fd=fd, follow_symlinks=False).st_mode
+            if not (stat.S_ISDIR(mode) or stat.S_ISREG(mode)):
+                raise ValueError("Symbolic links and special files cannot be previewed")
+            next_fd = os.open(part, flags, dir_fd=fd)
+            os.close(fd)
+            fd = next_fd
+        yield fd
+    finally:
+        os.close(fd)
 
 
 @dataclass(frozen=True)
@@ -20,6 +44,7 @@ class FileEntry:
 class FileTree:
     MAX_ENTRIES = 500
     MAX_ROWS = 2000
+    MAX_DIRECTORIES = 128
 
     def __init__(self, root: Path):
         self.root = root.resolve()
@@ -45,22 +70,29 @@ class FileTree:
     def children(self, path: Path) -> list[FileEntry]:
         if path not in self._cache:
             try:
-                with os.scandir(path) as entries:
-                    items = list(islice((e for e in entries if self.show_hidden or not e.name.startswith(".")),
-                                        self.MAX_ENTRIES + 1))
-                clipped = len(items) > self.MAX_ENTRIES
-                items = items[:self.MAX_ENTRIES]
                 rows = []
-                for entry in items:
-                    try:
-                        rows.append(FileEntry(Path(entry.path), 0, entry.is_dir(follow_symlinks=False), entry.is_symlink()))
-                    except OSError:
-                        rows.append(FileEntry(Path(entry.path), 0, note="unavailable"))
+                clipped = False
+                with _scoped_open(self.root, path, directory=True) as fd, os.scandir(fd) as entries:
+                    for scanned, entry in enumerate(islice(entries, 5001)):
+                        if scanned == 5000:
+                            clipped = True
+                            break
+                        if not self.show_hidden and entry.name.startswith("."):
+                            continue
+                        if len(rows) == self.MAX_ENTRIES:
+                            clipped = True
+                            break
+                        try:
+                            rows.append(FileEntry(path / entry.name, 0, entry.is_dir(follow_symlinks=False), entry.is_symlink()))
+                        except OSError:
+                            rows.append(FileEntry(path / entry.name, 0, note="unavailable"))
                 rows.sort(key=lambda entry: (not entry.directory, entry.path.name.casefold()))
                 if clipped:
-                    rows.append(FileEntry(path, 0, note=f"First {self.MAX_ENTRIES} entries; open a subfolder to browse more"))
-            except OSError as exc:
-                rows = [FileEntry(path, 0, note=exc.strerror or str(exc))]
+                    rows.append(FileEntry(path, 0, note=f"Listing limited to {self.MAX_ENTRIES} entries / 5000 scanned"))
+            except (OSError, ValueError) as exc:
+                rows = [FileEntry(path, 0, note=str(exc))]
+            if len(self._cache) >= self.MAX_DIRECTORIES:
+                self._cache.pop(next(iter(self._cache)))
             self._cache[path] = rows
         return self._cache[path]
 
@@ -91,7 +123,7 @@ class FileTree:
     def toggle(self, path: Path):
         if path in self.expanded:
             self.expanded.remove(path)
-        else:
+        elif len(self.expanded) < self.MAX_DIRECTORIES:
             self.expanded.add(path)
         self._rows = None
 
@@ -108,13 +140,22 @@ class FileTree:
                     break
 
 
-def file_preview(path: Path, max_bytes: int = 256_000, max_lines: int = 2000) -> str:
+def file_preview(path: Path, max_bytes: int = 256_000, max_lines: int = 2000, *, root: Path | None = None) -> str:
     """Read a bounded regular text file; never block on devices or FIFOs."""
     try:
-        if not stat.S_ISREG(path.stat().st_mode):
+        if root is None and not stat.S_ISREG(path.stat().st_mode):
             return "This is not a regular file."
-        with path.open("rb") as stream:
-            data = stream.read(max_bytes + 1)
+        if root is not None:
+            with _scoped_open(root, path) as fd:
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    return "This is not a regular file."
+                with os.fdopen(os.dup(fd), "rb") as stream:
+                    data = stream.read(max_bytes + 1)
+        else:
+            with os.fdopen(os.open(path, os.O_RDONLY | os.O_NONBLOCK), "rb") as stream:
+                if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                    return "This is not a regular file."
+                data = stream.read(max_bytes + 1)
         if b"\0" in data:
             return "Binary file — text preview unavailable."
         text = data[:max_bytes].decode("utf-8", errors="replace")

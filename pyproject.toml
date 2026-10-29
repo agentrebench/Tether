@@ -30,8 +30,10 @@ tether = "tether.cli:main"
 # subpackages live as plain subdirectories. Map the package name to "."
 # so `pip install -e .` from a fresh clone works without a src/ shim.
 [tool.setuptools.package-data]
-# Ship the built-in SKILL.md docs (they live outside any package dir).
-tether = ["skills_builtin/*/SKILL.md", "skills_builtin/*/*"]
+# Ship built-in skills and the pinned upstream zsh prompt collection.
+tether = ["skills_builtin/*/SKILL.md", "skills_builtin/*/*",
+          "vendor/oh-my-zsh/LICENSE.txt", "vendor/oh-my-zsh/manifest.json",
+          "vendor/oh-my-zsh/themes/*.zsh-theme", "vendor/oh-my-zsh/lib/*.zsh"]
 
 [tool.setuptools]
 package-dir = {"tether" = "."}

@@ -298,6 +298,16 @@ def test_plain_flag_works_with_default_start_and_run():
     assert build_parser().parse_args([]).plain is False
 
 
+def test_chat_layout_flags_are_exclusive_and_default_off():
+    for command in ("start", "chat", "run"):
+        args = build_parser().parse_args([command])
+        assert args.compact is False and args.workspace is False
+        assert build_parser().parse_args([command, "--workspace"]).workspace is True
+        for clash in (["--compact", "--workspace"], ["--workspace", "--plain"], ["--compact", "--plain"]):
+            with pytest.raises(SystemExit):
+                build_parser().parse_args([command, *clash])
+
+
 def wait_for(predicate, timeout=5):
     deadline = time.monotonic() + timeout
     while not predicate() and time.monotonic() < deadline:

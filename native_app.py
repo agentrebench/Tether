@@ -6,9 +6,12 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import re
+import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import termios
 import time
 
@@ -19,6 +22,93 @@ from .ui.theme_catalog import theme_catalog
 _MAX_INPUT = 16 * 1024
 _MAX_OUTPUT = 1024 * 1024
 _FIELDS = {"shell", "theme", "font", "theme_file"}
+# tmux session names are host-generated tokens; '.', ':' and spaces would be
+# interpreted as window or pane targets, so they are never accepted.
+_SESSION_NAME = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
+_TMUX_SOCKET_NAME = "tether"
+# Theme variables that must reach the shell inside a saved tmux session.
+_THEME_KEYS = ("ZDOTDIR", "TETHER_ZSH_BOOTSTRAP", "TETHER_ZSH_USER_DIR", "TETHER_ZSH_USER_DIR_SET",
+               "TETHER_ZSH_THEME_FILE", "TETHER_OMZ_ROOT", "TETHER_OMZ_BUNDLED")
+# Private server configuration: Tether draws the panes and tabs, so tmux's own
+# status line stays off. Mouse mode scrolls history and selects text; copies
+# reach the macOS pasteboard through OSC 52, which the display handles.
+_TMUX_CONF = """\
+set -g default-terminal "xterm-256color"
+set -as terminal-overrides ",xterm-256color:RGB"
+set -as terminal-overrides ',xterm-256color:Ms=\\E]52;%p1%s;%p2%s\\007'
+set -s set-clipboard on
+set -g mouse on
+set -g status off
+set -g history-limit 20000
+set -s escape-time 10
+set -g focus-events on
+set -g exit-empty on
+"""
+
+
+def tmux_executable():
+    return shutil.which("tmux")
+
+
+def validate_session(name):
+    if not isinstance(name, str) or not _SESSION_NAME.match(name):
+        raise ValueError("Session names use 1-32 letters, digits, '-' or '_'.")
+    return name
+
+
+def tmux_command(tmux, *arguments):
+    socket = os.environ.get("TETHER_TMUX_SOCKET", "")
+    selector = ["-S", socket] if socket else ["-L", _TMUX_SOCKET_NAME]
+    return [tmux, *selector, *arguments]
+
+
+def _tmux(tmux, *arguments):
+    return subprocess.run(tmux_command(tmux, *arguments), capture_output=True, text=True, timeout=5)
+
+
+def list_sessions():
+    """Saved shells on Tether's private tmux server; never the user's own tmux."""
+    tmux = tmux_executable()
+    if not tmux:
+        return {"protocol": 1, "tmux": False, "sessions": []}
+    result = _tmux(tmux, "list-sessions", "-F", "#{session_name}\t#{session_path}")
+    sessions = []
+    if result.returncode == 0:
+        for line in result.stdout.splitlines()[:64]:
+            name, _, path = line.partition("\t")
+            if _SESSION_NAME.match(name):
+                sessions.append({"name": name, "cwd": path})
+    return {"protocol": 1, "tmux": True, "sessions": sessions}
+
+
+def end_session(name):
+    validate_session(name)
+    tmux = tmux_executable()
+    if not tmux:
+        raise ValueError("tmux is not installed.")
+    result = _tmux(tmux, "kill-session", "-t", "=" + name)
+    return {"protocol": 1, "ended": result.returncode == 0}
+
+
+def tmux_attach_command(session, shell, env, cwd, conf):
+    """Attach to a saved session, or start it with the themed login shell.
+
+    A reattached session receives the fresh theme directory so windows the user
+    opens later with the tmux prefix still find their startup files."""
+    validate_session(session)
+    tmux = tmux_executable()
+    if not tmux:
+        raise ValueError("Saved sessions need tmux. Install it with: brew install tmux")
+    keys = [key for key in _THEME_KEYS if key in env]
+    if _tmux(tmux, "has-session", "-t", "=" + session).returncode == 0:
+        for key in keys:
+            _tmux(tmux, "set-environment", "-t", "=" + session, key, env[key])
+        return tmux_command(tmux, "attach-session", "-t", "=" + session)
+    command = tmux_command(tmux, "-f", conf, "new-session", "-s", session, "-c", cwd)
+    for key in keys:
+        command += ["-e", f"{key}={env[key]}"]
+    # New windows inside the session keep using the selected shell.
+    return command + [shell, "-l", ";", "set-option", "default-shell", shell]
 
 
 def settings_payload(config):
@@ -78,7 +168,7 @@ def _foreground(group):
         signal.signal(signal.SIGTTOU, previous)
 
 
-def run_shell(config, override=None):
+def run_shell(config, override=None, session=None):
     claim_terminal()
     theme_name = override if override is not None else config.terminal_theme
     shell = "zsh" if override is not None and override != "inherit" else config.terminal_shell
@@ -86,6 +176,7 @@ def run_shell(config, override=None):
     child = None
     previous_handlers = {}
     stopping_at = None
+    private = None
 
     def forward(signum, _frame=None):
         nonlocal stopping_at
@@ -124,7 +215,13 @@ def run_shell(config, override=None):
         # The shell owns the foreground group; wrapper stays alive only to own
         # theme resources. A fresh Python helper has no worker threads here.
         group_options = {"process_group": 0} if sys.version_info >= (3, 11) else {"preexec_fn": os.setpgrp}
-        child = subprocess.Popen([appearance.shell, "-l"], env=env, **group_options)
+        command = [appearance.shell, "-l"]
+        if session:
+            private = tempfile.TemporaryDirectory(prefix="tether-tmux-")
+            conf = Path(private.name) / "tmux.conf"
+            conf.write_text(_TMUX_CONF)
+            command = tmux_attach_command(session, appearance.shell, env, os.getcwd(), str(conf))
+        child = subprocess.Popen(command, env=env, **group_options)
         _foreground(child.pid)
         try:
             os.killpg(child.pid, signal.SIGCONT)
@@ -152,6 +249,8 @@ def run_shell(config, override=None):
         for sig, previous in previous_handlers.items():
             signal.signal(sig, previous)
         appearance.close()
+        if private is not None:
+            private.cleanup()
 
 
 def run_native_app(args):
@@ -167,17 +266,23 @@ def run_native_app(args):
             os.environ["TETHER_NATIVE_ACTIVITY"] = "1"
             return cmd_start(argparse.Namespace(compact=True, plain=False, port=None,
                             model=None, gguf_dirs=[], resume="", resume_last=False))
+        if args.action == "sessions":
+            write_json(list_sessions())
+            return 0
+        if args.action == "end-session":
+            write_json(end_session(getattr(args, "session", None)))
+            return 0
         config = TetherConfig.load()
         if args.action == "shell":
-            return run_shell(config, args.theme)
+            return run_shell(config, args.theme, session=getattr(args, "session", None) or None)
         if args.action == "save-settings":
             stream = getattr(sys.stdin, "buffer", sys.stdin)
             values = read_settings(stream)
             save_settings(config, values["shell"], values["theme"], values["font"], values["theme_file"])
         write_json(settings_payload(config))
         return 0
-    except (OSError, ValueError, TypeError) as exc:
-        if args.action in {"settings", "save-settings"}:
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError) as exc:
+        if args.action in {"settings", "save-settings", "sessions", "end-session"}:
             # Never echo malformed input or config contents to the host.
             message = "Invalid settings JSON." if isinstance(exc, (json.JSONDecodeError, UnicodeDecodeError)) else str(exc)
             write_json({"protocol": 1, "error": message[:512]})

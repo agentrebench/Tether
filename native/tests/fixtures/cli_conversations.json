@@ -1,0 +1,12 @@
+{
+  "claude": {
+    "version": "2.1.307",
+    "source": "Captured from installed CLI resuming generated JSONL, with dummy key and localhost-only endpoint; no model request. Only fixture conversation paint is included.",
+    "ansi": "\u001b[0m\u001b[2J\u001b[H\u001b[48;2;55;55;55m\u276f \u001b[38;2;255;255;255mHuman fixture question\u001b[39m                                                                                        \r\u001b[2B\u001b[49m\u001b[38;2;255;255;255m\u23fa\u001b[3G\u001b[39mAssistant\u001b[13Gfixture\u001b[21Gresponse.\r\u001b[2C\u001b[2BSecond\u001b[10Gresponse\u001b[19Gparagraph.\u001b[0m\r\n"
+  },
+  "codex": {
+    "version": "0.160.0",
+    "source": "Captured from installed CLI resuming a generated rollout, with an isolated configuration and localhost-only provider; no model request. Only fixture conversation paint is included.",
+    "ansi": "\u001b[0m\u001b[2J\u001b[H\u001b[39;49m\u001b[K\u001b[1m\u001b[2m\u203a \u001b[22m\u001b[22mHuman fixture question\u001b[39m\u001b[49m\u001b[0m\r\n\u001b[39;49m\u001b[K\u001b[39m\u001b[49m\u001b[0m\r\n\u001b[39;49m\u001b[K\u001b[39m\u001b[49m\u001b[0m\r\n\u001b[39;49m\u001b[K\u001b[2m\u2022 \u001b[22mAssistant fixture response.\u001b[39m\u001b[49m\u001b[0m\r\n\u001b[39;49m\u001b[K\u001b[39m\u001b[49m\u001b[0m\r\n\u001b[39;49m\u001b[K  Second response paragraph.\u001b[39m\u001b[49m\u001b[0m\u001b[0m\r\n"
+  }
+}
