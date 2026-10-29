@@ -170,8 +170,12 @@ def test_cli_shows_menu_before_auth_or_server_start(monkeypatch, argv):
     pick.assert_called_once()
 
 
-@pytest.mark.parametrize("compact", [False, True])
-def test_selected_provider_reaches_terminal_chat(monkeypatch, compact):
+@pytest.mark.parametrize("argv,compact", [
+    (["chat"], True),              # a terminal chat looks like the native Agent pane
+    (["chat", "--compact"], True),
+    (["chat", "--workspace"], False),
+])
+def test_selected_provider_reaches_terminal_chat(monkeypatch, argv, compact):
     from tether.ui import repl
 
     monkeypatch.setattr(cli.sys, "stdin", SimpleNamespace(isatty=lambda: True))
@@ -184,13 +188,35 @@ def test_selected_provider_reaches_terminal_chat(monkeypatch, compact):
     chat = Mock()
     chat.return_value.run.return_value = 0
     monkeypatch.setattr(repl, "TetherREPL", chat)
-    assert cli.main(["chat", "--compact"] if compact else ["chat"]) == 0
+    assert cli.main(argv) == 0
     assert config.provider == "openai" and config.api_model != "saved-model"
     if compact:
         chat.assert_called_once_with(config, plain=True, compact=True)
     else:
         chat.assert_called_once_with(config, plain=False)
     chat.return_value.run.assert_called_once_with(resume="")
+
+
+@pytest.mark.parametrize("argv,expected", [
+    (["chat"], {"plain": False}),                       # pipes keep the classic prompt
+    (["run"], {"plain": False}),
+    (["chat", "--plain"], {"plain": True}),
+    (["chat", "--compact"], {"plain": True, "compact": True}),  # explicit opt-in still wins
+])
+def test_chat_without_a_terminal_keeps_the_classic_prompt(monkeypatch, argv, expected):
+    from tether.ui import repl
+
+    monkeypatch.setattr(cli.sys, "stdin", SimpleNamespace(isatty=lambda: False))
+    monkeypatch.setattr(cli.sys, "stdout", SimpleNamespace(isatty=lambda: False))
+    monkeypatch.setattr(cli, "setup_logging", lambda: None)
+    config = TetherConfig(provider="anthropic", api_model="saved-model", api_keys={"anthropic": "test-key"})
+    monkeypatch.setattr(TetherConfig, "load", lambda: config)
+    monkeypatch.setattr(AgentPicker, "run", lambda self: pytest.fail("picker shown without a terminal"))
+    chat = Mock()
+    chat.return_value.run.return_value = 0
+    monkeypatch.setattr(repl, "TetherREPL", chat)
+    assert cli.main(argv) == 0
+    chat.assert_called_once_with(config, **expected)
 
 
 @pytest.mark.parametrize('rows,columns', [(8, 30), (12, 40), (16, 40), (19, 60)])

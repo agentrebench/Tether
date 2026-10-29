@@ -1367,6 +1367,23 @@ def cmd_terminal(args: argparse.Namespace) -> int:
     return ShellWorkspace(TetherConfig.load()).run() or 0
 
 
+def _chat_options(args: argparse.Namespace) -> dict:
+    """REPL layout for a chat command.
+
+    Interactive terminals default to the compact chat, the same scrolling
+    conversation the native app's Agent pane shows. ``--workspace`` keeps the
+    sidebar workspace; ``--plain``, pipes, and ``TERM=dumb`` keep the classic
+    prompt. An explicit ``--compact`` wins even without a terminal."""
+    if getattr(args, "compact", False):
+        return {"plain": True, "compact": True}
+    plain = getattr(args, "plain", False)
+    if plain or getattr(args, "workspace", False):
+        return {"plain": plain}
+    if not sys.stdin.isatty() or not sys.stdout.isatty() or os.environ.get("TERM") == "dumb":
+        return {"plain": False}
+    return {"plain": True, "compact": True}
+
+
 def cmd_start(args: argparse.Namespace) -> int:
     """Start server (if needed) + REPL in one command."""
     from .ui.repl import TetherREPL
@@ -1375,8 +1392,8 @@ def cmd_start(args: argparse.Namespace) -> int:
     config = TetherConfig.load()
     if not _select_terminal_agent(args, config):
         return 0
-    if getattr(args, "compact", False):
-        args.plain = True
+    options = _chat_options(args)
+    compact = options.get("compact", False)
     if args.port:
         config.port = args.port
 
@@ -1391,7 +1408,7 @@ def cmd_start(args: argparse.Namespace) -> int:
             print(error("Provider 'codex' is configured but Codex CLI is not logged in."))
             print(dim("  run: codex login --device-auth"))
             return 1
-        if not getattr(args, "compact", False):
+        if not compact:
             print(success(f"  using Codex CLI provider ({config.api_model})"))
             print()
     elif config.is_remote:
@@ -1425,9 +1442,6 @@ def cmd_start(args: argparse.Namespace) -> int:
             return 1
 
     try:
-        options = {"plain": getattr(args, "plain", False)}
-        if getattr(args, "compact", False):
-            options["compact"] = True
         repl = TetherREPL(config, **options)
         return repl.run(resume=_resume_target(args))
     finally:
@@ -1529,6 +1543,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     config = TetherConfig.load()
     if not _select_terminal_agent(args, config):
         return 0
+    options = _chat_options(args)
     if args.port:
         config.port = args.port
 
@@ -1543,8 +1558,9 @@ def cmd_run(args: argparse.Namespace) -> int:
             print(error("Provider 'codex' is configured but Codex CLI is not logged in."))
             print(dim("  run: codex login --device-auth"))
             return 1
-        print(success(f"  using Codex CLI provider ({config.api_model})"))
-        print()
+        if not options.get("compact", False):
+            print(success(f"  using Codex CLI provider ({config.api_model})"))
+            print()
     elif config.is_remote:
         # Remote provider: no local server to start. Just check that *some*
         # key is present (env var or stored) so we fail fast.
@@ -1577,7 +1593,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             return 1
 
     try:
-        repl = TetherREPL(config, plain=getattr(args, "plain", False))
+        repl = TetherREPL(config, **options)
         return repl.run(resume=_resume_target(args))
     finally:
         if server_proc and server_proc.poll() is None:
@@ -1935,6 +1951,17 @@ def cmd_models(args: argparse.Namespace) -> int:
     return 1
 
 
+def _add_chat_layout_flags(chat_parser: argparse.ArgumentParser) -> None:
+    """Chat look: compact by default on a terminal, matching the native Agent pane."""
+    layout = chat_parser.add_mutually_exclusive_group()
+    layout.add_argument("--compact", action="store_true",
+                        help="Compact chat, the look of the native app's Agent pane (default on a terminal)")
+    layout.add_argument("--workspace", action="store_true",
+                        help="Full conversation workspace with the agent sidebar and shell splits")
+    layout.add_argument("--plain", action="store_true", default=argparse.SUPPRESS,
+                        help="Classic scrolling prompt (automatic for pipes and TERM=dumb)")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="tether",
@@ -1952,9 +1979,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("terminal", help="Open the terminal workspace without agent setup")
     start_parser = subparsers.add_parser("start", aliases=["chat"], help="Choose an agent and start a Tether chat")
-    start_parser.add_argument("--compact", action="store_true", help="Use compact chat after choosing an agent")
-    start_parser.add_argument("--plain", action="store_true", default=argparse.SUPPRESS,
-                              help="Use the scrolling REPL without the agent sidebar")
+    _add_chat_layout_flags(start_parser)
     start_parser.add_argument("--port", type=int, help="Server port")
     start_parser.add_argument("--model", type=str, help="Path to GGUF model (skip interactive selector)")
     start_parser.add_argument(
@@ -1974,8 +1999,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     run_parser = subparsers.add_parser("run", help="Start server (if needed) + REPL")
-    run_parser.add_argument("--plain", action="store_true", default=argparse.SUPPRESS,
-                            help="Use the scrolling REPL without the agent sidebar")
+    _add_chat_layout_flags(run_parser)
     run_parser.add_argument("--port", type=int, help="Server port")
     run_parser.add_argument("--model", type=str, help="Path to GGUF model (skip interactive selector)")
     run_parser.add_argument(

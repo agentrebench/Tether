@@ -176,19 +176,23 @@ opens this workspace.
 
 The **Agent** tab shows the provider picker only when requested, then starts a
 compact Tether chat. You can return to your shell at any time by clicking its tab.
-For the full conversation workspace described below, run **`tether chat`**
-(`tether start` and `tether run` also remain available). Choose Claude, Codex, GPT,
+**`tether chat`** (`tether start` and `tether run` also remain available) opens
+that same compact chat in your own terminal, so the conversation looks the same
+in a plain terminal window as it does in the native app's Agent pane: no framed
+input box, no sidebar. Choose Claude, Codex, GPT,
 DeepSeek, Kimi, GLM, or a local model with Up/Down and Enter, or click an entry.
 The picker retains its Tether logo and animated light, shows credential
 readiness, and includes configured custom providers. After selection, compact
 chat uses a small session heading and an input that grows with your text, up to
-eight rows. Its colors follow the native app palette. Enter sends; Alt+Enter
+eight rows. Its colors follow the terminal palette. Enter sends; Alt+Enter
 adds a newline. Slash completion and input history remain available.
-Explicit model/resume options, `--plain`, pipes, and `TERM=dumb` retain their
-existing direct chat behavior.
+Add `--workspace` for the full conversation workspace described below.
+Explicit model/resume options skip the picker. `--plain`, pipes, and `TERM=dumb`
+retain the original scrolling prompt.
 
 ### Full conversation workspace
 
+Run `tether chat --workspace` (or `tether start --workspace`, `tether run --workspace`).
 A persistent left sidebar shows the host and its sub-agents with distinct provider marks
 (Claude, GPT, Codex, DeepSeek, Kimi, GLM, and local models), model names, and live
 status. Click an agent or use **Alt+Up/Down** to inspect its task, tool activity,

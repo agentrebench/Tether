@@ -2,8 +2,9 @@
 
 Bare interactive `tether` opens a real login shell in a terminal workspace. It
 performs no provider authentication or model startup. `tether terminal` explicitly
-opens it; `tether chat`, `start`, and `run` retain the full agent workspace.
-`--plain`, explicit resumes/models, pipes, and `TERM=dumb` retain direct chat.
+opens it; `tether chat`, `start`, and `run` open the compact chat, the same look
+as the Agent pane, and `--workspace` keeps the full agent workspace. `--plain`,
+pipes, and `TERM=dumb` retain the classic prompt; explicit resumes/models skip the picker.
 The optional Agent button starts Tether's own compact chat in a separate PTY tab.
 
 Click Settings to search the 142 included Oh My Zsh themes and any installed
