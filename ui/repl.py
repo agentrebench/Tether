@@ -1410,7 +1410,9 @@ class TetherREPL:
         print(dim(f"  {source}"))
         for index, model in enumerate(models, 1):
             current = " *" if model["id"] == cfg.api_model else ""
-            print(f"  {index:>2}. {model['id']}{current}")
+            name = model.get("label") or ""
+            label = f"  {dim(name)}" if name and name != model["id"] else ""
+            print(f"  {index:>2}. {model['id']}{label}{current}")
         print(dim("  Choose with /model <number or model-id> · /model refresh · /model stats"))
         if picker and getattr(self, "_workspace", None) is not None and models:
             self._workspace.open_models(models, label, source)

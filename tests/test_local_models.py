@@ -217,3 +217,14 @@ def test_workspace_picker_offers_local_models_and_selection_resolves_the_path(mo
     switched.assert_called_once_with(found[1])
     repl._handle_model(["/model", "list"], None)
     assert workspace.open_models.call_count == 1
+
+
+def test_remote_model_list_shows_friendly_names_beside_ids(capsys):
+    config = TetherConfig(provider="deepseek", api_model="deepseek-flash")
+    config.save = Mock()
+    repl = TetherREPL.__new__(TetherREPL)
+    repl.config = config
+    repl._workspace = None
+    repl._handle_model(["/model", "list"], None)
+    out = capsys.readouterr().out
+    assert "deepseek-flash" in out and "DeepSeek V4.1 Flash" in out and "deepseek-v4-pro" in out
