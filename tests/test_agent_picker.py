@@ -170,7 +170,8 @@ def test_cli_shows_menu_before_auth_or_server_start(monkeypatch, argv):
     pick.assert_called_once()
 
 
-def test_selected_provider_reaches_terminal_chat(monkeypatch):
+@pytest.mark.parametrize("compact", [False, True])
+def test_selected_provider_reaches_terminal_chat(monkeypatch, compact):
     from tether.ui import repl
 
     monkeypatch.setattr(cli.sys, "stdin", SimpleNamespace(isatty=lambda: True))
@@ -183,7 +184,10 @@ def test_selected_provider_reaches_terminal_chat(monkeypatch):
     chat = Mock()
     chat.return_value.run.return_value = 0
     monkeypatch.setattr(repl, "TetherREPL", chat)
-    assert cli.main(["chat"]) == 0
+    assert cli.main(["chat", "--compact"] if compact else ["chat"]) == 0
     assert config.provider == "openai" and config.api_model != "saved-model"
-    chat.assert_called_once_with(config, plain=False)
+    if compact:
+        chat.assert_called_once_with(config, plain=True, compact=True)
+    else:
+        chat.assert_called_once_with(config, plain=False)
     chat.return_value.run.assert_called_once_with(resume="")

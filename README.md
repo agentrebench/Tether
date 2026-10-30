@@ -206,8 +206,12 @@ changes Tether's working directory and the starting directory for new shells;
 existing shells keep their own directories. Finish or stop the current Tether task
 before changing folders. File previews are read only.
 
-Use `tether --plain` (or `tether start --plain`) for the original scrolling
-REPL. Pipes and `TERM=dumb` select that mode automatically. Provider marks use
+Use `tether --plain` (or `tether start --plain`) for the scrolling REPL. It
+uses the same compact session look as the macOS app's Agent pane: a small
+`◇ tether / Provider` heading, a one-line composer with a placeholder, and a
+status line showing the model, reasoning effort, and context use. Add
+`--classic` for the full TETHER banner and framed composer. Pipes and
+`TERM=dumb` select the scrolling mode automatically. Provider marks use
 standard Unicode characters and text labels, so no Nerd Font is required.
 
 ### Zsh themes and Powerline fonts

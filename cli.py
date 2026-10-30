@@ -1347,6 +1347,18 @@ def _resume_target(args: argparse.Namespace) -> str:
     return ""
 
 
+def _repl_options(args: argparse.Namespace) -> dict:
+    """The scrolling REPL (``--plain``, ``--compact``, and the native/terminal
+    Agent tabs) uses the compact session look; ``--classic`` keeps the full
+    TETHER banner and framed composer. The full-screen conversation workspace
+    is unchanged."""
+    plain = bool(getattr(args, "plain", False) or getattr(args, "compact", False))
+    options = {"plain": plain}
+    if plain and not getattr(args, "classic", False):
+        options["compact"] = True
+    return options
+
+
 def _select_terminal_agent(args: argparse.Namespace, config: TetherConfig) -> bool:
     """Interactive terminal entry only; explicit models, resumes and pipes skip it."""
     if (getattr(args, "plain", False) or getattr(args, "model", None) or _resume_target(args)
@@ -1375,8 +1387,7 @@ def cmd_start(args: argparse.Namespace) -> int:
     config = TetherConfig.load()
     if not _select_terminal_agent(args, config):
         return 0
-    if getattr(args, "compact", False):
-        args.plain = True
+    options = _repl_options(args)
     if args.port:
         config.port = args.port
 
@@ -1391,8 +1402,9 @@ def cmd_start(args: argparse.Namespace) -> int:
             print(error("Provider 'codex' is configured but Codex CLI is not logged in."))
             print(dim("  run: codex login --device-auth"))
             return 1
-        print(success(f"  using Codex CLI provider ({config.api_model})"))
-        print()
+        if not options.get("compact"):
+            print(success(f"  using Codex CLI provider ({config.api_model})"))
+            print()
     elif config.is_remote:
         # Remote provider: no local server to start. Just check that *some*
         # key is present (env var or stored) so we fail fast.
@@ -1424,7 +1436,7 @@ def cmd_start(args: argparse.Namespace) -> int:
             return 1
 
     try:
-        repl = TetherREPL(config, plain=getattr(args, "plain", False))
+        repl = TetherREPL(config, **options)
         return repl.run(resume=_resume_target(args))
     finally:
         if server_proc and server_proc.poll() is None:
@@ -1525,6 +1537,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     config = TetherConfig.load()
     if not _select_terminal_agent(args, config):
         return 0
+    options = _repl_options(args)
     if args.port:
         config.port = args.port
 
@@ -1539,8 +1552,9 @@ def cmd_run(args: argparse.Namespace) -> int:
             print(error("Provider 'codex' is configured but Codex CLI is not logged in."))
             print(dim("  run: codex login --device-auth"))
             return 1
-        print(success(f"  using Codex CLI provider ({config.api_model})"))
-        print()
+        if not options.get("compact"):
+            print(success(f"  using Codex CLI provider ({config.api_model})"))
+            print()
     elif config.is_remote:
         # Remote provider: no local server to start. Just check that *some*
         # key is present (env var or stored) so we fail fast.
@@ -1573,7 +1587,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             return 1
 
     try:
-        repl = TetherREPL(config, plain=getattr(args, "plain", False))
+        repl = TetherREPL(config, **options)
         return repl.run(resume=_resume_target(args))
     finally:
         if server_proc and server_proc.poll() is None:
@@ -1944,6 +1958,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="version", version=f"tether {__version__}")
     parser.add_argument("--plain", action="store_true", help="Use the scrolling REPL without the agent sidebar")
+    parser.add_argument("--classic", action="store_true",
+                        help="Show the full TETHER banner and framed composer in the scrolling REPL")
     subparsers = parser.add_subparsers(dest="command")
 
     subparsers.add_parser("terminal", help="Open the terminal workspace without agent setup")
@@ -1951,6 +1967,8 @@ def build_parser() -> argparse.ArgumentParser:
     start_parser.add_argument("--compact", action="store_true", help="Use compact chat after choosing an agent")
     start_parser.add_argument("--plain", action="store_true", default=argparse.SUPPRESS,
                               help="Use the scrolling REPL without the agent sidebar")
+    start_parser.add_argument("--classic", action="store_true", default=argparse.SUPPRESS,
+                              help="Show the full TETHER banner and framed composer in the scrolling REPL")
     start_parser.add_argument("--port", type=int, help="Server port")
     start_parser.add_argument("--model", type=str, help="Path to GGUF model (skip interactive selector)")
     start_parser.add_argument(
@@ -1972,6 +1990,8 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser = subparsers.add_parser("run", help="Start server (if needed) + REPL")
     run_parser.add_argument("--plain", action="store_true", default=argparse.SUPPRESS,
                             help="Use the scrolling REPL without the agent sidebar")
+    run_parser.add_argument("--classic", action="store_true", default=argparse.SUPPRESS,
+                            help="Show the full TETHER banner and framed composer in the scrolling REPL")
     run_parser.add_argument("--port", type=int, help="Server port")
     run_parser.add_argument("--model", type=str, help="Path to GGUF model (skip interactive selector)")
     run_parser.add_argument(
