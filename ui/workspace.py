@@ -140,7 +140,7 @@ class TerminalWorkspace:
         self.notice = ""
         self.selected = "host"
         self.sidebar_visible = True
-        self.mouse_enabled = False  # native selection and copy/paste by default; F10 enables clicks
+        self.mouse_enabled = True  # F10 or Alt+M hands the mouse to the terminal for native selection
         self.scroll_line: int | None = None
         self._cached_revision = -1
         self._cached_transcript = ""
@@ -372,12 +372,12 @@ class TerminalWorkspace:
             ("", "│ × Close ", self._click(self.close_pane)),
             ("", "│ Mouse ", self._click(self.toggle_mouse)),
             ("class:waiting" if self.notice else "class:muted",
-             "\n " + (self.notice or "Ctrl+W then arrow: split · F6: next pane · F2: settings · F3: files · F10: mouse clicks")),
+             "\n " + (self.notice or "Ctrl+W then arrow: split · F6: next pane · F2: settings · F3: files · F10: select text")),
         ])
         return fragments
 
-    MOUSE_ON_NOTICE = "Mouse on: click agents, panes and buttons · F10 returns the mouse to your terminal"
-    MOUSE_OFF_NOTICE = "Mouse off: drag to select, copy and paste as usual · F10 or Alt+M makes the sidebar clickable"
+    MOUSE_ON_NOTICE = "Mouse on: agents, panes and buttons are clickable · F10 or Alt+M lets your terminal select text"
+    MOUSE_OFF_NOTICE = "Mouse off: your terminal selects and copies · F10 or Alt+M brings clicks back"
 
     def toggle_mouse(self):
         """Switch between native terminal selection and clickable chrome."""

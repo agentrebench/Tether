@@ -16,6 +16,7 @@ from prompt_toolkit.mouse_events import MouseEventType
 from prompt_toolkit.output import ColorDepth
 from prompt_toolkit.styles import Style
 
+from .pane_select import PaneSelection, export_clipboard
 from .panes import Pane, PaneLayout
 from .shell_dialog import ShellDialog
 from .shell_theme import save_settings
@@ -49,11 +50,10 @@ class ShellWorkspace:
         self.backends = set()
         self._next_id = 1
         self._stopping = False
-        # The mouse belongs to the terminal emulator by default so dragging
-        # selects text and the usual copy/paste shortcuts work. F10 (or the
-        # Mouse button) opts into mouse tracking for clickable tabs and
-        # wheel scrollback.
-        self.mouse_enabled = False
+        # Mouse tracking keeps tabs and buttons clickable; panes provide their
+        # own drag-to-copy and click-to-paste (see pane_select). F10, Alt+M,
+        # or the Mouse button hands the mouse to the terminal emulator instead.
+        self.mouse_enabled = True
         self.empty = Window(FormattedTextControl("Open a terminal with +, or choose Settings."))
         bindings = KeyBindings()
         idle = Condition(lambda: self.dialog is None)
@@ -88,6 +88,7 @@ class ShellWorkspace:
                 "bar": "bg:#1b2229 #aab8c5", "brand": "#7dd9bf bold",
                 "tab-active": "bg:#33434a #e5fff7 bold noreverse",
                 "muted": "#91a0ae", "border": "#33434a", "action": "#dce3e9",
+                "pane-selection": "reverse",
                 "dialog": "bg:#1b2229 #dce3e9", "dialog.body": "bg:#1b2229 #dce3e9",
                 "dialog.body text-area": "bg:#101418 #e5fff7",
                 "dialog.body text-area last-line": "nounderline",
@@ -129,21 +130,33 @@ class ShellWorkspace:
             (" Split ", self.split), (" Mouse ", self.toggle_mouse), (" Settings ", self.open_settings),
         )]
 
-    MOUSE_ON_NOTICE = "Mouse on: click tabs and buttons, wheel scrolls history · F10 returns the mouse to your terminal"
-    MOUSE_OFF_NOTICE = "Mouse off: drag to select, copy and paste as usual · F10 or Alt+M makes tabs clickable"
-    KEYS_HINT = "Keys: F4 terminal · F9 agent · F8 split · F2 settings · Shift+PgUp history · F10 mouse"
+    MOUSE_ON_NOTICE = "Mouse on: drag to copy · right-click or middle-click pastes · tabs and buttons are clickable"
+    MOUSE_OFF_NOTICE = "Mouse off: your terminal selects and copies · F10 or Alt+M brings clicks back"
 
     def toggle_mouse(self):
-        """Switch between native terminal selection and clickable chrome.
+        """Hand the mouse to the terminal emulator, or take it back.
 
-        Mouse tracking lets tabs, buttons, and wheel scrollback work, but it
-        stops the emulator from selecting text and from its own copy/paste.
-        Each notice names the key that switches back, since buttons cannot be
-        clicked while tracking is off.
+        Buttons cannot be clicked while tracking is off, so the notice names
+        the key that switches back.
         """
         self.mouse_enabled = not self.mouse_enabled
         self.notice = self.MOUSE_ON_NOTICE if self.mouse_enabled else self.MOUSE_OFF_NOTICE
         self.invalidate()
+
+    def copied(self, text):
+        self.app.clipboard.set_text(text)
+        export_clipboard(text, self.app.output)
+        count = len(text)
+        self.notice = f"Copied {count} character{'s' if count != 1 else ''} · right-click or middle-click pastes"
+        self.invalidate()
+
+    def paste_into(self, terminal):
+        text = self.app.clipboard.get_data().text
+        if not text:
+            self.notice = "Nothing copied yet: drag across text to copy it."
+            self.invalidate()
+            return
+        terminal.process.write_input(text, paste=True)
 
     def status(self):
         if self.is_scrollback():
@@ -237,14 +250,21 @@ class ShellWorkspace:
             terminal = Terminal(backend=backend, style="class:terminal",
                                 done_callback=lambda: backend.loop.call_soon(self.finished, tab, backend))
             mouse_handler = terminal.terminal_control.mouse_handler
+            selection = PaneSelection(terminal, self.copied, self.paste_into)
 
             def mouse(event):
                 screen = terminal.process.screen
                 application_mouse = (screen.mouse_support_enabled or screen.sgr_mouse_support_enabled
                                      or screen.urxvt_mouse_support_enabled)
-                if event.event_type == MouseEventType.SCROLL_UP and not application_mouse:
+                if application_mouse:
+                    mouse_handler(event)
+                elif event.event_type == MouseEventType.SCROLL_UP:
                     tab.panes.active = next(p for p in tab.panes.leaves() if p.terminal is terminal)
                     self.scrollback(terminal)
+                elif selection.handle(event):
+                    if event.event_type == MouseEventType.MOUSE_UP:
+                        mouse_handler(event)  # a click still focuses the pane
+                    self.invalidate()
                 else:
                     mouse_handler(event)
             terminal.terminal_control.mouse_handler = mouse
@@ -377,11 +397,7 @@ class ShellWorkspace:
 
     async def run_async(self):
         try:
-            def start():
-                self.new_terminal()
-                if not self.mouse_enabled and not self.notice:
-                    self.notice = self.KEYS_HINT
-            return await self.app.run_async(pre_run=start)
+            return await self.app.run_async(pre_run=self.new_terminal)
         finally:
             self._stopping = True
             for backend in self.backends:

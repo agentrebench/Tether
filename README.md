@@ -149,11 +149,15 @@ New terminals start in the directory where you launched Tether.
 tabs, **F8** splits right, and **F9** opens an Agent tab. Normal shell key bindings
 are passed through. Scroll the mouse wheel or press **Shift+PageUp** to browse
 terminal history; **Esc** returns to the live prompt. `tether terminal` explicitly
-opens this workspace. Your terminal keeps the mouse, so dragging selects text and
-the usual copy and paste shortcuts work. Press **F10** (or **Alt+M**) to make the
-tabs and buttons clickable and let the wheel scroll history; press it again to
-return the mouse to the terminal. The same key works in the conversation
-workspace.
+opens this workspace. Drag across any pane to copy the text under the selection,
+then right-click or middle-click to paste it into a pane; this works over SSH
+too. The copy also reaches your system clipboard when the terminal accepts
+OSC 52 (iTerm2 with clipboard access enabled, kitty, WezTerm, Alacritty, foot)
+or when `pbcopy`, `wl-copy`, `xclip`, or `xsel` is available locally. Pasting
+with your terminal's own shortcut works as usual. Programs that use the mouse
+themselves, such as vim or htop, receive the mouse instead. To let your
+terminal select text natively, press **F10** or **Alt+M** (or click **Mouse**);
+tabs and buttons stop responding to clicks until you press it again.
 
 The **Agent** tab shows the provider picker only when requested, then starts a
 compact Tether chat. You can return to your shell at any time by clicking its tab.
