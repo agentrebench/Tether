@@ -232,6 +232,15 @@ class ShellWorkspace:
             self.active.panes.active.terminal.exit_copy_mode()
             self.invalidate()
 
+    def active_directory(self) -> Path:
+        """Where the active shell is now; new tabs, splits, and agents start there."""
+        if self.active and self.active.panes.active.terminal is not None:
+            backend = self.active.panes.active.terminal.process.backend
+            current = backend.current_directory() if hasattr(backend, "current_directory") else None
+            if current is not None and current.is_dir():
+                return current
+        return self.cwd
+
     def _open(self, *, draft=None, agent=False, direction=None):
         if sum(len(tab.panes.leaves()) for tab in self.tabs) >= self.MAX_TERMINALS:
             self.notice = "Eight terminals are open. Close a tab before opening another."
@@ -239,11 +248,12 @@ class ShellWorkspace:
             return None
         from ptterm import Terminal
         config = self.config
+        cwd = self.active_directory()
         shell, theme, font, file = draft or (config.terminal_shell, config.terminal_theme,
                                            config.terminal_font_mode, config.terminal_theme_file)
         backend = None
         try:
-            backend = ShellBackend(self.cwd, "" if agent else shell,
+            backend = ShellBackend(cwd, "" if agent else shell,
                                    theme="inherit" if agent else theme, font=font, theme_file=file,
                                    command=tether_command("chat", "--compact") if agent else None)
             tab = self.active if direction and self.active else TerminalTab(self._next_id, "Agent" if agent else Path(backend.shell).name)

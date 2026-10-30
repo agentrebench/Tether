@@ -261,3 +261,37 @@ def test_drag_copies_pane_text_and_right_click_pastes_it(shell_home):
                 await asyncio.wait_for(running, timeout=5)
 
     asyncio.run(run())
+
+
+def test_new_tabs_and_agents_start_in_the_active_shells_directory(shell_home):
+    config = TetherConfig(terminal_shell='zsh')
+    (shell_home / 'child').mkdir()
+
+    async def run():
+        with create_pipe_input() as pipe:
+            ui = ShellWorkspace(config, cwd=shell_home, input=pipe, output=PaintedOutput())
+            running = asyncio.create_task(ui.run_async())
+            try:
+                await until(lambda: ui.active and 'READY>' in terminal_text(ui.active.panes.active))
+                first = ui.active
+                assert ui.active_directory() == shell_home
+                pipe.send_text("cd child; printf 'moved-%s\\n' ok\r")
+                await until(lambda: 'moved-ok' in terminal_text(first.panes.active))
+                await until(lambda: ui.active_directory() == shell_home / 'child')
+                await click(ui, ' + ')
+                await until(lambda: ui.active is not first)
+                assert ui.active.panes.active.terminal.process.backend.cwd == shell_home / 'child'
+                await until(lambda: 'READY>' in terminal_text(ui.active.panes.active))
+                pipe.send_text('pwd\r')
+                await until(lambda: str(shell_home / 'child') in terminal_text(ui.active.panes.active))
+                ui.focus_tab(first)
+                await click(ui, ' Agent ')
+                await until(lambda: ui.active.title == 'Agent')
+                backend = ui.active.panes.active.terminal.process.backend
+                assert backend.cwd == shell_home / 'child'
+                assert backend.command[-2:] == ['chat', '--compact']
+            finally:
+                ui.app.exit(result=0)
+                await asyncio.wait_for(running, timeout=5)
+
+    asyncio.run(run())

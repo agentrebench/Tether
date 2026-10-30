@@ -61,6 +61,37 @@ class ShellBackend(Backend):
     def closed(self):
         return self._closed
 
+    def current_directory(self) -> Path | None:
+        """The directory the shell in this pane is in right now, or None.
+
+        Asks the foreground process of the PTY (the shell itself when idle),
+        not the spawned process: a one-file build starts a bootloader whose
+        cwd never changes. Linux reads /proc; macOS asks lsof.
+        """
+        if self.process is None or self.process.poll() is not None or self.master is None:
+            return None
+        try:
+            pid = os.tcgetpgrp(self.master)
+        except OSError:
+            pid = 0
+        if pid <= 0:
+            pid = self.process.pid
+        proc = Path(f"/proc/{pid}/cwd")
+        try:
+            if proc.exists():
+                return Path(os.readlink(proc))
+        except OSError:
+            return None
+        try:
+            out = subprocess.run(["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
+                                 capture_output=True, text=True, timeout=2)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        for line in out.stdout.splitlines():
+            if line.startswith("n/"):
+                return Path(line[1:])
+        return None
+
     def add_input_ready_callback(self, callback):
         self._callbacks.append(callback)
 

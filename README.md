@@ -160,7 +160,9 @@ terminal select text natively, press **F10** or **Alt+M** (or click **Mouse**);
 tabs and buttons stop responding to clicks until you press it again.
 
 The **Agent** tab shows the provider picker only when requested, then starts a
-compact Tether chat. You can return to your shell at any time by clicking its tab.
+compact Tether chat. New tabs, splits, and Agent tabs open in the directory the
+active shell is currently in, so `cd` into a project and click **Agent** to work
+there; `/cd <path>` moves a running agent. You can return to your shell at any time by clicking its tab.
 For the full conversation workspace described below, run **`tether chat`**
 (`tether start` and `tether run` also remain available). Choose Claude, Codex, GPT,
 DeepSeek, Kimi, GLM, or a local model with Up/Down and Enter, or click an entry.
