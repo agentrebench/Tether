@@ -214,11 +214,13 @@ def test_mouse_toggle_hands_selection_back_to_the_terminal(shell_home):
     from prompt_toolkit.keys import Keys
     with create_pipe_input() as pipe:
         ui = ShellWorkspace(TetherConfig(), cwd=shell_home, input=pipe, output=PaintedOutput())
-        assert ui.app.mouse_support()
-        assert any(binding.keys == (Keys.F10,) for binding in ui.app.key_bindings.bindings)
-        assert 'Select' in ''.join(fragment[1] for fragment in ui.actions())
+        # The terminal owns the mouse until asked: drag-select and copy/paste work as usual.
+        assert not ui.app.mouse_support()
+        keys = [binding.keys for binding in ui.app.key_bindings.bindings]
+        assert (Keys.F10,) in keys and (Keys.Escape, 'm') in keys
+        assert 'Mouse' in ''.join(fragment[1] for fragment in ui.actions())
         ui.toggle_mouse()
-        assert not ui.app.mouse_support() and 'F10' in ui.notice
+        assert ui.app.mouse_support() and 'F10' in ui.notice
         assert 'F10' in ''.join(fragment[1] for fragment in ui.status())
         ui.toggle_mouse()
-        assert ui.app.mouse_support() and not ui.notice
+        assert not ui.app.mouse_support() and 'select' in ui.notice

@@ -140,7 +140,7 @@ class TerminalWorkspace:
         self.notice = ""
         self.selected = "host"
         self.sidebar_visible = True
-        self.mouse_enabled = True
+        self.mouse_enabled = False  # native selection and copy/paste by default; F10 enables clicks
         self.scroll_line: int | None = None
         self._cached_revision = -1
         self._cached_transcript = ""
@@ -271,7 +271,8 @@ class TerminalWorkspace:
             self.toggle_files()
 
         @kb.add("f10", filter=no_dialog)
-        def select_text(event):
+        @kb.add("escape", "m", filter=no_dialog)
+        def toggle_mouse(event):
             self.toggle_mouse()
 
         @kb.add("f6", filter=no_dialog)
@@ -369,21 +370,19 @@ class TerminalWorkspace:
             fragments.append(("", f" {arrow} ", self._click(lambda d=direction: self.split_pane(d))))
         fragments.extend([
             ("", "│ × Close ", self._click(self.close_pane)),
-            ("", "│ Select ", self._click(self.toggle_mouse)),
+            ("", "│ Mouse ", self._click(self.toggle_mouse)),
             ("class:waiting" if self.notice else "class:muted",
-             "\n " + (self.notice or "Ctrl+W then arrow: split · F6: next pane · F2: settings · F3: files · F10: select text")),
+             "\n " + (self.notice or "Ctrl+W then arrow: split · F6: next pane · F2: settings · F3: files · F10: mouse clicks")),
         ])
         return fragments
 
-    MOUSE_OFF_NOTICE = "Mouse off: drag to select and copy text · F10 restores clicks and scrolling"
+    MOUSE_ON_NOTICE = "Mouse on: click agents, panes and buttons · F10 returns the mouse to your terminal"
+    MOUSE_OFF_NOTICE = "Mouse off: drag to select, copy and paste as usual · F10 or Alt+M makes the sidebar clickable"
 
     def toggle_mouse(self):
-        """Hand the mouse back to the terminal emulator for native selection."""
+        """Switch between native terminal selection and clickable chrome."""
         self.mouse_enabled = not self.mouse_enabled
-        if not self.mouse_enabled:
-            self.notice = self.MOUSE_OFF_NOTICE
-        elif self.notice == self.MOUSE_OFF_NOTICE:
-            self.notice = ""
+        self.notice = self.MOUSE_ON_NOTICE if self.mouse_enabled else self.MOUSE_OFF_NOTICE
         self.invalidate()
 
     def _rebuild_panes(self):

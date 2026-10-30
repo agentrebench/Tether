@@ -49,15 +49,19 @@ class ShellWorkspace:
         self.backends = set()
         self._next_id = 1
         self._stopping = False
-        self.mouse_enabled = True
+        # The mouse belongs to the terminal emulator by default so dragging
+        # selects text and the usual copy/paste shortcuts work. F10 (or the
+        # Mouse button) opts into mouse tracking for clickable tabs and
+        # wheel scrollback.
+        self.mouse_enabled = False
         self.empty = Window(FormattedTextControl("Open a terminal with +, or choose Settings."))
         bindings = KeyBindings()
         idle = Condition(lambda: self.dialog is None)
         for key, action in (("f2", self.open_settings), ("f4", self.new_terminal),
                             ("f6", self.next_pane), ("f7", self.next_tab),
                             ("f8", self.split), ("f9", self.new_agent),
-                            ("f10", self.toggle_mouse)):
-            bindings.add(key, filter=idle, eager=True)(lambda event, action=action: action())
+                            ("f10", self.toggle_mouse), ("escape m", self.toggle_mouse)):
+            bindings.add(*key.split(), filter=idle, eager=True)(lambda event, action=action: action())
         for key in ("escape", "c-c"):
             bindings.add(key, filter=~idle, eager=True)(lambda event: self.close_dialog())
         bindings.add("s-pageup", filter=idle, eager=True)(lambda event: self.scrollback())
@@ -122,23 +126,23 @@ class ShellWorkspace:
     def actions(self):
         return [("class:action", text, self.click(action)) for text, action in (
             (" + ", self.new_terminal), (" Agent ", self.new_agent),
-            (" Split ", self.split), (" Select ", self.toggle_mouse), (" Settings ", self.open_settings),
+            (" Split ", self.split), (" Mouse ", self.toggle_mouse), (" Settings ", self.open_settings),
         )]
 
-    MOUSE_OFF_NOTICE = "Mouse off: drag to select and copy text · F10 restores clicks and scrolling"
+    MOUSE_ON_NOTICE = "Mouse on: click tabs and buttons, wheel scrolls history · F10 returns the mouse to your terminal"
+    MOUSE_OFF_NOTICE = "Mouse off: drag to select, copy and paste as usual · F10 or Alt+M makes tabs clickable"
+    KEYS_HINT = "Keys: F4 terminal · F9 agent · F8 split · F2 settings · Shift+PgUp history · F10 mouse"
 
     def toggle_mouse(self):
-        """Hand the mouse back to the terminal emulator for native selection.
+        """Switch between native terminal selection and clickable chrome.
 
         Mouse tracking lets tabs, buttons, and wheel scrollback work, but it
-        also stops the emulator from selecting text. Clicks do nothing while
-        it is off, so the notice names the key that turns it back on.
+        stops the emulator from selecting text and from its own copy/paste.
+        Each notice names the key that switches back, since buttons cannot be
+        clicked while tracking is off.
         """
         self.mouse_enabled = not self.mouse_enabled
-        if not self.mouse_enabled:
-            self.notice = self.MOUSE_OFF_NOTICE
-        elif self.notice == self.MOUSE_OFF_NOTICE:
-            self.notice = ""
+        self.notice = self.MOUSE_ON_NOTICE if self.mouse_enabled else self.MOUSE_OFF_NOTICE
         self.invalidate()
 
     def status(self):
@@ -373,7 +377,11 @@ class ShellWorkspace:
 
     async def run_async(self):
         try:
-            return await self.app.run_async(pre_run=self.new_terminal)
+            def start():
+                self.new_terminal()
+                if not self.mouse_enabled and not self.notice:
+                    self.notice = self.KEYS_HINT
+            return await self.app.run_async(pre_run=start)
         finally:
             self._stopping = True
             for backend in self.backends:

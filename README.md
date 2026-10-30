@@ -149,10 +149,11 @@ New terminals start in the directory where you launched Tether.
 tabs, **F8** splits right, and **F9** opens an Agent tab. Normal shell key bindings
 are passed through. Scroll the mouse wheel or press **Shift+PageUp** to browse
 terminal history; **Esc** returns to the live prompt. `tether terminal` explicitly
-opens this workspace. Click **Select** or press **F10** to hand the mouse back to
-your terminal so you can drag to select and copy text; press **F10** again to
-restore clickable tabs and wheel scrolling. (Most terminals also allow native
-selection while holding Option or Shift.)
+opens this workspace. Your terminal keeps the mouse, so dragging selects text and
+the usual copy and paste shortcuts work. Press **F10** (or **Alt+M**) to make the
+tabs and buttons clickable and let the wheel scroll history; press it again to
+return the mouse to the terminal. The same key works in the conversation
+workspace.
 
 The **Agent** tab shows the provider picker only when requested, then starts a
 compact Tether chat. You can return to your shell at any time by clicking its tab.
