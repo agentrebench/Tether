@@ -1448,35 +1448,38 @@ class TetherREPL:
         llama-server loads one GGUF per process, so a selection is a server
         restart, never a silent config change that the running server ignores.
         """
-        from ..cli import _launch_server_background, served_model_path, stop_server_on_port
+        from ..cli import (_launch_server_background, configure_context, convert_model, server_serves,
+                           stop_server_on_port)
         cfg = self.config
         if model.format != "gguf":
-            print(warning(f"  {model.name} is not a GGUF file."))
-            print(dim(f"  Convert and load it with: tether start --model {model.path}"))
-            return
-        served = served_model_path(cfg)
-        same = False
-        if served:
-            try:
-                same = Path(served).expanduser().resolve() == model.path.resolve()
-            except OSError:
-                same = served == str(model.path)
-        if same:
+            # The conversation workspace owns stdin, so it cannot answer the
+            # quantization prompt; the scrolling REPL asks as usual.
+            quant = "Q4_K_M" if self._workspace is not None else None
+            if quant:
+                print(dim(f"  Converting with {quant} (use tether start --model <path> to pick another)."))
+            if not convert_model(model, quant_type=quant):
+                print(error("  Conversion failed; the current model stays loaded."))
+                return
+        if server_serves(cfg, model.path):
             cfg.model_path = str(model.path)
             cfg.save()
             print(success(f"  {model.name} is already loaded ({cfg.server_url})"))
             return
+        previous = (cfg.context_size, cfg.parallel_slots, cfg.cache_type_k, cfg.cache_type_v)
+        configure_context(cfg, model)
         print(dim(f"  restarting llama-server with {model.name}…"))
-        if not stop_server_on_port(cfg):
+        ok = stop_server_on_port(cfg)
+        if not ok:
             print(error(f"  The server on port {cfg.port} did not stop; the current model stays loaded."))
-            return
-        if _launch_server_background(cfg, model_override=model.path) is None:
+        elif _launch_server_background(cfg, model_override=model.path) is None:
             print(error("  llama-server did not start, so no local model is loaded now."))
             print(dim(f"  Try again with /model, or: tether start --model {model.path}"))
+        else:
+            cfg.model_path = str(model.path)
+            cfg.save()
+            print(success(f"  switched to local ({model.name}) · {cfg.context_size:,} context"))
             return
-        cfg.model_path = str(model.path)
-        cfg.save()
-        print(success(f"  switched to local ({model.name})"))
+        cfg.context_size, cfg.parallel_slots, cfg.cache_type_k, cfg.cache_type_v = previous
 
     def _show_model_stats(self, engine: QueryEngine) -> None:
         """Show what /model currently reflects: the active model, whether it's

@@ -542,10 +542,14 @@ tether start
 
 An interactive selector lists every model found, with format / size / native context length. Tether auto-tunes `context_size`, `parallel_slots`, and KV cache type to fit your GPU memory, then launches `llama-server` in the background and drops you into the REPL.
 
-Skip the selector when you know the path:
+Skip the selector when you know the path. `--model` always means the local
+provider, even when an API provider is saved, and it restarts a running
+llama-server that holds a different model. A Hugging Face snapshot folder with
+safetensors weights is converted to GGUF first:
 
 ```
 tether start --model ~/Projects/Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-Q8_0.gguf
+tether start --model ~/.cache/huggingface/hub/models--org--repo/snapshots/<hash>
 tether stop                                      # kills the background llama-server
 ```
 
@@ -594,7 +598,7 @@ tether models remove-dir <path>
 
 # common flags on start/run
 --port <n>                # override server port
---model <path>            # skip the interactive selector
+--model <path>            # local GGUF file or safetensors folder (converted); skips the selector
 --gguf-dir <path>         # add an extra GGUF search dir for this run
 ```
 

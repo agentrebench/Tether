@@ -109,9 +109,11 @@ REMOTE_PROVIDERS = {
     },
     "deepseek": {
         "label": "DeepSeek",
-        "description": "DeepSeek V4 coding and agent models.",
+        "description": "DeepSeek V4.1 Flash and V4 Pro coding and agent models.",
         "api_base_url": "https://api.deepseek.com",
-        "api_model": "deepseek-v4-flash",
+        # The Flash id is version-free: DeepSeek serves its newest Flash model
+        # (V4.1-Flash-1017 at the time of writing) under "deepseek-flash".
+        "api_model": "deepseek-flash",
         "api_key_env": "DEEPSEEK_API_KEY",
         # V4 supports explicit reasoning effort. Default the everyday Flash
         # model to reasoning-off for low latency; users can select high/max or
@@ -126,9 +128,20 @@ REMOTE_PROVIDERS = {
         "requires_api_key": True,
         "models": [
             {
+                "id": "deepseek-flash",
+                "label": "DeepSeek V4.1 Flash",
+                "description": "Served by DeepSeek-V4.1-Flash-1017 · fast everyday coding",
+                "context_size": DEFAULT_REMOTE_CONTEXT_SIZE,
+                "reasoning_efforts": ["off", "high", "max"],
+                "default_reasoning_effort": "off",
+                "max_reasoning_effort": "max",
+            },
+            {
+                # Retired alias kept so saved configurations keep their
+                # reasoning controls; requests are served as deepseek-flash.
                 "id": "deepseek-v4-flash",
-                "label": "DeepSeek V4 Flash",
-                "description": "Faster responses for everyday coding",
+                "label": "DeepSeek V4 Flash (retired alias)",
+                "description": "Served as deepseek-flash at the Flash price",
                 "context_size": DEFAULT_REMOTE_CONTEXT_SIZE,
                 "reasoning_efforts": ["off", "high", "max"],
                 "default_reasoning_effort": "off",

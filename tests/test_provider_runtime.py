@@ -26,7 +26,8 @@ class ProviderCatalogTests(unittest.TestCase):
     def test_expected_providers_and_fast_deepseek_model_are_available(self):
         self.assertTrue({"deepseek", "kimi", "openai", "glm", "anthropic", "codex"}.issubset(REMOTE_PROVIDERS))
         ids = {model["id"] for model in REMOTE_PROVIDERS["deepseek"]["models"]}
-        self.assertEqual(ids, {"deepseek-v4-flash", "deepseek-v4-pro"})
+        self.assertEqual(ids, {"deepseek-flash", "deepseek-v4-flash", "deepseek-v4-pro"})
+        self.assertEqual(REMOTE_PROVIDERS["deepseek"]["api_model"], "deepseek-flash")
 
     def test_catalog_is_secret_free_and_reports_keys_per_provider(self):
         config = TetherConfig(

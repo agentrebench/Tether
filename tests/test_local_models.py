@@ -111,17 +111,95 @@ def test_failed_restart_or_stop_leaves_configuration_alone(monkeypatch, tmp_path
     config.save.assert_not_called()
 
 
-def test_safetensors_models_point_at_the_conversion_path(monkeypatch, tmp_path, capsys):
+def test_safetensors_models_are_converted_before_the_restart(monkeypatch, tmp_path, capsys):
     found = models(tmp_path)
     found[2].format = "safetensors"
-    repl, config = local_repl(found)
+    repl, config = local_repl(found, workspace=Mock())
     monkeypatch.setattr(cli, "discover_models", lambda extra_dirs=None: found)
+    monkeypatch.setattr(cli, "served_model_path", lambda cfg: None)
+    converted = tmp_path / "Qwen3-8B-Q4_K_M.gguf"
+
+    def convert(model, quant_type=None):
+        assert quant_type == "Q4_K_M"  # the workspace cannot answer the interactive prompt
+        model.path, model.format = converted, "gguf"
+        return converted
+
+    monkeypatch.setattr(cli, "_convert_to_gguf", convert)
+    stop, launch = Mock(return_value=True), Mock(return_value=object())
+    monkeypatch.setattr(cli, "stop_server_on_port", stop)
+    monkeypatch.setattr(cli, "_launch_server_background", launch)
+    repl._handle_model(["/model", "Qwen3-8B"], None)
+    launch.assert_called_once_with(config, model_override=converted)
+    assert config.model_path == str(converted) and found[2].format == "gguf"
+    monkeypatch.setattr(cli, "_convert_to_gguf", lambda model, quant_type=None: None)
+    found[1].format = "safetensors"
+    repl._handle_model(["/model", "coder"], None)
+    assert "Conversion failed" in capsys.readouterr().out
+    assert stop.call_count == 1 and config.model_path == str(converted)
+
+
+def test_model_from_path_accepts_gguf_files_and_safetensors_folders(tmp_path):
+    gguf = tmp_path / "small.gguf"
+    gguf.write_bytes(b"GGUF")
+    model = cli.model_from_path(gguf)
+    assert (model.format, model.name, model.path) == ("gguf", "small", gguf)
+    snapshot = tmp_path / "org--repo"
+    snapshot.mkdir()
+    (snapshot / "model-00001-of-00002.safetensors").write_bytes(b"x" * 10)
+    (snapshot / "model-00002-of-00002.safetensors").write_bytes(b"x" * 5)
+    model = cli.model_from_path(snapshot)
+    assert (model.format, model.path, model.size_bytes) == ("safetensors", snapshot, 15)
+    assert cli.model_from_path(snapshot / "model-00002-of-00002.safetensors").path == snapshot
+    assert cli.model_from_path(tmp_path / "missing") is None
+    (tmp_path / "empty").mkdir()
+    assert cli.model_from_path(tmp_path / "empty") is None
+
+
+def test_explicit_model_flag_switches_a_remote_configuration_to_local(monkeypatch, tmp_path):
+    from tether.ui import repl as repl_module
+    snapshot = tmp_path / "weights"
+    snapshot.mkdir()
+    (snapshot / "model.safetensors").write_bytes(b"x")
+    converted = tmp_path / "weights-Q4_K_M.gguf"
+    config = TetherConfig(provider="deepseek", api_model="deepseek-flash", api_keys={"deepseek": "k"})
+    config.save = Mock()
+    monkeypatch.setattr(TetherConfig, "load", lambda: config)
+    monkeypatch.setattr(cli, "setup_logging", lambda: None)
+    monkeypatch.setattr(cli, "server_is_running", lambda cfg: False)
+    monkeypatch.setattr(cli, "_convert_to_gguf", lambda model, quant_type=None: converted)
+    launch = Mock(return_value=None)  # launched, nothing to stop afterwards
+    monkeypatch.setattr(cli, "_launch_server_background", Mock(return_value=Mock(poll=lambda: 1)))
+    chat = Mock()
+    chat.return_value.run.return_value = 0
+    monkeypatch.setattr(repl_module, "TetherREPL", chat)
+    assert cli.main(["start", "--model", str(snapshot)]) == 0
+    assert config.provider == "local" and config.model_path == str(converted)
+    cli._launch_server_background.assert_called_once_with(config, model_override=converted)
+    chat.assert_called_once_with(config, plain=False)
+
+
+def test_explicit_model_flag_restarts_a_server_holding_another_model(monkeypatch, tmp_path):
+    from tether.ui import repl as repl_module
+    gguf = tmp_path / "other.gguf"
+    gguf.write_bytes(b"GGUF")
+    config = TetherConfig(provider="local", model_path=str(tmp_path / "old.gguf"))
+    config.save = Mock()
+    monkeypatch.setattr(TetherConfig, "load", lambda: config)
+    monkeypatch.setattr(cli, "setup_logging", lambda: None)
+    monkeypatch.setattr(cli, "server_is_running", lambda cfg: True)
+    monkeypatch.setattr(cli, "served_model_path", lambda cfg: str(tmp_path / "old.gguf"))
     stop = Mock(return_value=True)
     monkeypatch.setattr(cli, "stop_server_on_port", stop)
-    repl._handle_model(["/model", "Qwen3-8B"], None)
-    assert "not a GGUF" in capsys.readouterr().out
-    stop.assert_not_called()
-    config.save.assert_not_called()
+    monkeypatch.setattr(cli, "_launch_server_background", Mock(return_value=Mock(poll=lambda: 1)))
+    chat = Mock()
+    chat.return_value.run.return_value = 0
+    monkeypatch.setattr(repl_module, "TetherREPL", chat)
+    assert cli.main(["start", "--model", str(gguf)]) == 0
+    stop.assert_called_once_with(config)
+    cli._launch_server_background.assert_called_once_with(config, model_override=gguf)
+    monkeypatch.setattr(cli, "served_model_path", lambda cfg: str(gguf))
+    assert cli.main(["start", "--model", str(gguf)]) == 0
+    assert stop.call_count == 1 and cli._launch_server_background.call_count == 1
 
 
 def test_workspace_picker_offers_local_models_and_selection_resolves_the_path(monkeypatch, tmp_path, capsys):
