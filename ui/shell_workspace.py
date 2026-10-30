@@ -49,12 +49,14 @@ class ShellWorkspace:
         self.backends = set()
         self._next_id = 1
         self._stopping = False
+        self.mouse_enabled = True
         self.empty = Window(FormattedTextControl("Open a terminal with +, or choose Settings."))
         bindings = KeyBindings()
         idle = Condition(lambda: self.dialog is None)
         for key, action in (("f2", self.open_settings), ("f4", self.new_terminal),
                             ("f6", self.next_pane), ("f7", self.next_tab),
-                            ("f8", self.split), ("f9", self.new_agent)):
+                            ("f8", self.split), ("f9", self.new_agent),
+                            ("f10", self.toggle_mouse)):
             bindings.add(key, filter=idle, eager=True)(lambda event, action=action: action())
         for key in ("escape", "c-c"):
             bindings.add(key, filter=~idle, eager=True)(lambda event: self.close_dialog())
@@ -65,7 +67,7 @@ class ShellWorkspace:
         # belong to the PTY, not to an agent composer or a global prefix map.
         bar = VSplit([
             Window(FormattedTextControl(self.tab_bar), height=1, style="class:bar"),
-            Window(FormattedTextControl(self.actions), width=30, height=1, style="class:bar"),
+            Window(FormattedTextControl(self.actions), width=38, height=1, style="class:bar"),
         ])
         self.root = FloatContainer(HSplit([
             bar, DynamicContainer(self.visible_content),
@@ -75,7 +77,8 @@ class ShellWorkspace:
         ], style="class:terminal"), floats=[])
         self.app = Application(
             layout=Layout(self.root), input=input, output=output, full_screen=True,
-            mouse_support=True, key_bindings=bindings, color_depth=ColorDepth.TRUE_COLOR,
+            mouse_support=Condition(lambda: self.mouse_enabled), key_bindings=bindings,
+            color_depth=ColorDepth.TRUE_COLOR,
             style=Style.from_dict({
                 "": "bg:#101418 #dce3e9", "terminal": "bg:#101418 #dce3e9",
                 "bar": "bg:#1b2229 #aab8c5", "brand": "#7dd9bf bold",
@@ -119,8 +122,24 @@ class ShellWorkspace:
     def actions(self):
         return [("class:action", text, self.click(action)) for text, action in (
             (" + ", self.new_terminal), (" Agent ", self.new_agent),
-            (" Split ", self.split), (" Settings ", self.open_settings),
+            (" Split ", self.split), (" Select ", self.toggle_mouse), (" Settings ", self.open_settings),
         )]
+
+    MOUSE_OFF_NOTICE = "Mouse off: drag to select and copy text · F10 restores clicks and scrolling"
+
+    def toggle_mouse(self):
+        """Hand the mouse back to the terminal emulator for native selection.
+
+        Mouse tracking lets tabs, buttons, and wheel scrollback work, but it
+        also stops the emulator from selecting text. Clicks do nothing while
+        it is off, so the notice names the key that turns it back on.
+        """
+        self.mouse_enabled = not self.mouse_enabled
+        if not self.mouse_enabled:
+            self.notice = self.MOUSE_OFF_NOTICE
+        elif self.notice == self.MOUSE_OFF_NOTICE:
+            self.notice = ""
+        self.invalidate()
 
     def status(self):
         if self.is_scrollback():

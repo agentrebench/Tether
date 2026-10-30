@@ -140,6 +140,7 @@ class TerminalWorkspace:
         self.notice = ""
         self.selected = "host"
         self.sidebar_visible = True
+        self.mouse_enabled = True
         self.scroll_line: int | None = None
         self._cached_revision = -1
         self._cached_transcript = ""
@@ -269,6 +270,10 @@ class TerminalWorkspace:
         def files(event):
             self.toggle_files()
 
+        @kb.add("f10", filter=no_dialog)
+        def select_text(event):
+            self.toggle_mouse()
+
         @kb.add("f6", filter=no_dialog)
         def next_pane(event):
             self.panes.cycle()
@@ -291,7 +296,7 @@ class TerminalWorkspace:
         self.app = Application(
             layout=Layout(root, focused_element=composer),
             key_bindings=merge_key_bindings([ConditionalKeyBindings(_build_key_bindings(), in_composer), kb]),
-            full_screen=True, mouse_support=True,
+            full_screen=True, mouse_support=Condition(lambda: self.mouse_enabled),
             min_redraw_interval=0.05, refresh_interval=0.2,
             input=input, output=output,
             color_depth=ColorDepth.DEPTH_1_BIT if "NO_COLOR" in os.environ else None,
@@ -364,10 +369,22 @@ class TerminalWorkspace:
             fragments.append(("", f" {arrow} ", self._click(lambda d=direction: self.split_pane(d))))
         fragments.extend([
             ("", "│ × Close ", self._click(self.close_pane)),
+            ("", "│ Select ", self._click(self.toggle_mouse)),
             ("class:waiting" if self.notice else "class:muted",
-             "\n " + (self.notice or "Ctrl+W then arrow: split · F6: next pane · F2: settings · F3: files")),
+             "\n " + (self.notice or "Ctrl+W then arrow: split · F6: next pane · F2: settings · F3: files · F10: select text")),
         ])
         return fragments
+
+    MOUSE_OFF_NOTICE = "Mouse off: drag to select and copy text · F10 restores clicks and scrolling"
+
+    def toggle_mouse(self):
+        """Hand the mouse back to the terminal emulator for native selection."""
+        self.mouse_enabled = not self.mouse_enabled
+        if not self.mouse_enabled:
+            self.notice = self.MOUSE_OFF_NOTICE
+        elif self.notice == self.MOUSE_OFF_NOTICE:
+            self.notice = ""
+        self.invalidate()
 
     def _rebuild_panes(self):
         def build(node):

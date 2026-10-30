@@ -208,3 +208,17 @@ def test_shell_commands_settings_preview_save_and_agent_tab(shell_home, monkeypa
                     await running
             assert not ui.backends
     asyncio.run(run())
+
+
+def test_mouse_toggle_hands_selection_back_to_the_terminal(shell_home):
+    from prompt_toolkit.keys import Keys
+    with create_pipe_input() as pipe:
+        ui = ShellWorkspace(TetherConfig(), cwd=shell_home, input=pipe, output=PaintedOutput())
+        assert ui.app.mouse_support()
+        assert any(binding.keys == (Keys.F10,) for binding in ui.app.key_bindings.bindings)
+        assert 'Select' in ''.join(fragment[1] for fragment in ui.actions())
+        ui.toggle_mouse()
+        assert not ui.app.mouse_support() and 'F10' in ui.notice
+        assert 'F10' in ''.join(fragment[1] for fragment in ui.status())
+        ui.toggle_mouse()
+        assert ui.app.mouse_support() and not ui.notice

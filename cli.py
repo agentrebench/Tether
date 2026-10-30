@@ -807,6 +807,33 @@ def _convert_to_gguf(model: DiscoveredModel) -> Path | None:
     return final_path
 
 
+def resolve_model_choice(choice: str, models: list[DiscoveredModel]) -> tuple[DiscoveredModel | None, str]:
+    """Pick a discovered model by list number, name, file name, path, or a
+    unique case-insensitive fragment of the name. Returns ``(model, problem)``
+    where ``problem`` explains an empty result."""
+    text = choice.strip()
+    if not text:
+        return None, "Enter a model number or name."
+    if text.isdecimal():
+        index = int(text) - 1
+        if 0 <= index < len(models):
+            return models[index], ""
+        return None, f"Invalid choice: {text} (choose 1-{len(models)})"
+    folded = text.casefold()
+    expanded = Path(text).expanduser()
+    for model in models:
+        names = {model.name, model.path.name, model.path.stem, str(model.path)}
+        if folded in {name.casefold() for name in names} or model.path == expanded:
+            return model, ""
+    matches = [m for m in models if folded in m.name.casefold() or folded in m.path.name.casefold()]
+    if len(matches) == 1:
+        return matches[0], ""
+    if matches:
+        shown = ", ".join(m.name for m in matches[:4]) + (" …" if len(matches) > 4 else "")
+        return None, f"'{text}' matches several models: {shown}"
+    return None, f"No local model matches '{text}'."
+
+
 def select_model(config: TetherConfig, extra_dirs: list[Path] | None = None) -> Path | None:
     """Interactive model selector. Returns path to model file/dir, or None."""
     from .ui.colors import bold, dim, error, DIM, RESET, CYAN, GREEN, YELLOW, MAGENTA
@@ -857,6 +884,7 @@ def select_model(config: TetherConfig, extra_dirs: list[Path] | None = None) -> 
         prompt_str = "  > "
         if default_idx:
             prompt_str = f"  [{default_idx}]> "
+        print(dim("  Enter a number or a model name."))
 
         try:
             choice = input(prompt_str).strip()
@@ -869,16 +897,10 @@ def select_model(config: TetherConfig, extra_dirs: list[Path] | None = None) -> 
         elif not choice:
             choice = "1"
 
-        try:
-            idx = int(choice) - 1
-            if idx < 0 or idx >= len(models):
-                print(error(f"  Invalid choice: {choice}"))
-                return None
-        except ValueError:
-            print(error(f"  Invalid choice: {choice}"))
+        selected, problem = resolve_model_choice(choice, models)
+        if selected is None:
+            print(error(f"  {problem}"))
             return None
-
-        selected = models[idx]
 
     if selected.format != "gguf":
         result = _convert_to_gguf(selected)

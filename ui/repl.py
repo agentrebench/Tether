@@ -1356,7 +1356,7 @@ class TetherREPL:
             self._handle_provider(["/model", action], engine)
             return
         if not self.config.is_remote:
-            self._list_models()
+            self._select_local_model(" ".join(sub))
             return
         model_id = " ".join(sub)
         if model_id.isdecimal():
@@ -1380,14 +1380,20 @@ class TetherREPL:
     def _list_models(self, *, force: bool = False, picker: bool = False) -> None:
         cfg = self.config
         if not cfg.is_remote:
-            # llama-server loads one GGUF at startup; listing a file must not
-            # pretend that changing model_path hot-swapped the running server.
-            from ..cli import discover_models
-            models = discover_models(extra_dirs=[Path(p) for p in cfg.gguf_dirs])
-            print(bold("  Local GGUF models"))
-            for model in models:
-                print(f"    {model.path}")
-            print(dim("  Load a local model with: tether start --model <path>"))
+            models = self._discover_local_models()
+            if not models:
+                print(warning("  No local models found."))
+                print(dim("  Download a GGUF to ~/.cache/huggingface/hub/ or add a folder with: tether models add <dir>"))
+                return
+            choices = [self._local_model_choice(model) for model in models]
+            self._listed_models = ("local", choices)
+            print(bold("  Local models"))
+            for index, (model, choice) in enumerate(zip(models, choices), 1):
+                current = " *" if cfg.model_path and Path(cfg.model_path) == model.path else ""
+                print(f"  {index:>2}. {model.name}  {dim(choice['description'])}{current}")
+            print(dim("  Choose with /model <number or model name> · the local server restarts with that model"))
+            if picker and getattr(self, "_workspace", None) is not None:
+                self._workspace.open_models(choices, "Local", "GGUF files on this machine")
             return
         models = provider_models(cfg.provider, cfg, force=force)
         # Keep the current selection visible even during a discovery outage.
@@ -1408,6 +1414,69 @@ class TetherREPL:
         print(dim("  Choose with /model <number or model-id> · /model refresh · /model stats"))
         if picker and getattr(self, "_workspace", None) is not None and models:
             self._workspace.open_models(models, label, source)
+
+    def _discover_local_models(self) -> list:
+        from ..cli import discover_models
+        models = discover_models(extra_dirs=[Path(p) for p in self.config.gguf_dirs])
+        self._local_models = models
+        return models
+
+    @staticmethod
+    def _local_model_choice(model) -> dict:
+        bits = [model.format, model.size_human]
+        if model.context_length:
+            bits.append(f"ctx {model.context_human}")
+        return {"id": str(model.path), "label": model.name, "description": " · ".join(bits)}
+
+    def _select_local_model(self, choice: str) -> None:
+        """``/model <number or name>`` on the local provider."""
+        from ..cli import resolve_model_choice
+        models = getattr(self, "_local_models", None) or self._discover_local_models()
+        if not models:
+            print(warning("  No local models found."))
+            return
+        model, problem = resolve_model_choice(choice, models)
+        if model is None:
+            print(warning(f"  {problem}"))
+            print(dim("  Run /model to see the numbered list of local models."))
+            return
+        self._switch_local_model(model)
+
+    def _switch_local_model(self, model) -> None:
+        """Restart llama-server with ``model``; config follows only on success.
+
+        llama-server loads one GGUF per process, so a selection is a server
+        restart, never a silent config change that the running server ignores.
+        """
+        from ..cli import _launch_server_background, served_model_path, stop_server_on_port
+        cfg = self.config
+        if model.format != "gguf":
+            print(warning(f"  {model.name} is not a GGUF file."))
+            print(dim(f"  Convert and load it with: tether start --model {model.path}"))
+            return
+        served = served_model_path(cfg)
+        same = False
+        if served:
+            try:
+                same = Path(served).expanduser().resolve() == model.path.resolve()
+            except OSError:
+                same = served == str(model.path)
+        if same:
+            cfg.model_path = str(model.path)
+            cfg.save()
+            print(success(f"  {model.name} is already loaded ({cfg.server_url})"))
+            return
+        print(dim(f"  restarting llama-server with {model.name}…"))
+        if not stop_server_on_port(cfg):
+            print(error(f"  The server on port {cfg.port} did not stop; the current model stays loaded."))
+            return
+        if _launch_server_background(cfg, model_override=model.path) is None:
+            print(error("  llama-server did not start, so no local model is loaded now."))
+            print(dim(f"  Try again with /model, or: tether start --model {model.path}"))
+            return
+        cfg.model_path = str(model.path)
+        cfg.save()
+        print(success(f"  switched to local ({model.name})"))
 
     def _show_model_stats(self, engine: QueryEngine) -> None:
         """Show what /model currently reflects: the active model, whether it's

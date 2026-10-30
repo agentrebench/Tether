@@ -149,7 +149,10 @@ New terminals start in the directory where you launched Tether.
 tabs, **F8** splits right, and **F9** opens an Agent tab. Normal shell key bindings
 are passed through. Scroll the mouse wheel or press **Shift+PageUp** to browse
 terminal history; **Esc** returns to the live prompt. `tether terminal` explicitly
-opens this workspace.
+opens this workspace. Click **Select** or press **F10** to hand the mouse back to
+your terminal so you can drag to select and copy text; press **F10** again to
+restore clickable tabs and wheel scrolling. (Most terminals also allow native
+selection while holding Option or Shift.)
 
 The **Agent** tab shows the provider picker only when requested, then starts a
 compact Tether chat. You can return to your shell at any time by clicking its tab.
@@ -475,7 +478,7 @@ tether remote                                   # confirms: provider=<name>, api
 tether start
 ```
 
-If neither key source is configured when you run `tether remote <provider>`, it offers to capture and store one inline. Inside the REPL, `/provider <name>` switches providers without restarting. `/model` opens a searchable picker for the active provider; use arrow keys and Enter, or `/model <model-id>` to select directly. `/model list` prints a numbered list, `/model <number>` selects from it, and `/model refresh` reloads the list. Codex reads its installed CLI catalog, including new models such as GPT-6 Astra, while API providers use their own model endpoints. If discovery is unavailable, Tether labels the fallback catalog. `/model stats` shows the active model and token usage.
+If neither key source is configured when you run `tether remote <provider>`, it offers to capture and store one inline. Inside the REPL, `/provider <name>` switches providers without restarting. `/model` opens a searchable picker for the active provider; use arrow keys and Enter, or `/model <model-id>` to select directly. `/model list` prints a numbered list, `/model <number>` selects from it, and `/model refresh` reloads the list. On the local provider the list shows your GGUF files; choose one by number, name, or file name and Tether restarts llama-server with it (the startup selector accepts the same choices). Codex reads its installed CLI catalog, including new models such as GPT-6 Astra, while API providers use their own model endpoints. If discovery is unavailable, Tether labels the fallback catalog. `/model stats` shows the active model and token usage.
 
 **Custom OpenAI-compatible endpoint** (anything speaking `/v1/chat/completions`):
 
@@ -618,7 +621,7 @@ Slash commands:
 /provider                               # show current model provider
 /provider <name>                        # switch (e.g. openai, kimi, local)
 /model                                 # choose a model for the active provider
-/model <id or number>                   # switch within the active provider
+/model <id, name, or number>            # switch within the active provider (local: restarts llama-server)
 /model list|refresh|stats               # list / refresh models / show usage
 /effort                                # choose this model's reasoning effort
 /effort <level or number>               # set a supported reasoning setting
