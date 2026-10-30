@@ -420,3 +420,16 @@ def test_settings_keyboard_navigation_and_file_preview(tmp_path):
             return 0
 
         assert ui.run(session) == 0
+
+
+def test_mouse_toggle_hands_selection_back_to_the_terminal():
+    with create_pipe_input() as pipe:
+        ui = TerminalWorkspace(make_repl(), input=pipe, output=PaintedOutput())
+        assert ui.app.mouse_support()
+        assert "Mouse" in to_plain_text(ui._pane_toolbar())
+        ui.toggle_mouse()
+        assert not ui.app.mouse_support() and "F10" in ui.notice
+        assert "Mouse off" in to_plain_text(ui._pane_toolbar())
+        render_frame(ui)
+        ui.toggle_mouse()
+        assert ui.app.mouse_support() and "clickable" in ui.notice

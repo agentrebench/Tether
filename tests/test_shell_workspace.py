@@ -208,3 +208,90 @@ def test_shell_commands_settings_preview_save_and_agent_tab(shell_home, monkeypa
                     await running
             assert not ui.backends
     asyncio.run(run())
+
+
+def test_mouse_toggle_hands_selection_back_to_the_terminal(shell_home):
+    from prompt_toolkit.keys import Keys
+    with create_pipe_input() as pipe:
+        ui = ShellWorkspace(TetherConfig(), cwd=shell_home, input=pipe, output=PaintedOutput())
+        assert ui.app.mouse_support()
+        keys = [binding.keys for binding in ui.app.key_bindings.bindings]
+        assert (Keys.F10,) in keys and (Keys.Escape, 'm') in keys
+        assert 'Mouse' in ''.join(fragment[1] for fragment in ui.actions())
+        ui.toggle_mouse()
+        assert not ui.app.mouse_support() and 'F10' in ui.notice
+        assert 'F10' in ''.join(fragment[1] for fragment in ui.status())
+        ui.toggle_mouse()
+        assert ui.app.mouse_support() and 'paste' in ui.notice
+
+
+def test_drag_copies_pane_text_and_right_click_pastes_it(shell_home):
+    config = TetherConfig(terminal_shell='zsh')
+
+    async def pane_mouse(ui, kind, x, y, button=MouseButton.LEFT):
+        with set_app(ui.app):
+            ui.app.renderer.mouse_handlers.mouse_handlers[y][x](
+                MouseEvent(Point(x, y), kind, button, frozenset()))
+        ui.invalidate()
+        await asyncio.sleep(.05)
+
+    async def run():
+        with create_pipe_input() as pipe:
+            ui = ShellWorkspace(config, cwd=shell_home, input=pipe, output=PaintedOutput())
+            running = asyncio.create_task(ui.run_async())
+            try:
+                await until(lambda: ui.active and 'READY>' in terminal_text(ui.active.panes.active))
+                pane = ui.active.panes.active
+                pipe.send_text("printf 'copy-%s\\n' please\r")
+                await until(lambda: any(row.startswith('copy-please') for row in frame(ui)))
+                y = next(y for y, row in enumerate(frame(ui)) if row.startswith('copy-please'))
+                await pane_mouse(ui, MouseEventType.MOUSE_DOWN, 0, y)
+                await pane_mouse(ui, MouseEventType.MOUSE_MOVE, 10, y)
+                assert 'pane-selection' in str(pane.terminal.terminal_control.create_content(80, 20).get_line(
+                    y - 1 + pane.terminal.process.screen.line_offset)[0][0])
+                await pane_mouse(ui, MouseEventType.MOUSE_UP, 10, y)
+                assert ui.app.clipboard.get_data().text == 'copy-please'
+                assert ui.notice.startswith('Copied 11 characters')
+                await pane_mouse(ui, MouseEventType.MOUSE_UP, 0, y, MouseButton.RIGHT)
+                # The printf line itself says copy-%s, so the output and the paste make two.
+                await until(lambda: terminal_text(pane).count('copy-please') >= 2)
+                assert 'READY> copy-please' in terminal_text(pane)
+            finally:
+                ui.app.exit(result=0)
+                await asyncio.wait_for(running, timeout=5)
+
+    asyncio.run(run())
+
+
+def test_new_tabs_and_agents_start_in_the_active_shells_directory(shell_home):
+    config = TetherConfig(terminal_shell='zsh')
+    (shell_home / 'child').mkdir()
+
+    async def run():
+        with create_pipe_input() as pipe:
+            ui = ShellWorkspace(config, cwd=shell_home, input=pipe, output=PaintedOutput())
+            running = asyncio.create_task(ui.run_async())
+            try:
+                await until(lambda: ui.active and 'READY>' in terminal_text(ui.active.panes.active))
+                first = ui.active
+                assert ui.active_directory() == shell_home
+                pipe.send_text("cd child; printf 'moved-%s\\n' ok\r")
+                await until(lambda: 'moved-ok' in terminal_text(first.panes.active))
+                await until(lambda: ui.active_directory() == shell_home / 'child')
+                await click(ui, ' + ')
+                await until(lambda: ui.active is not first)
+                assert ui.active.panes.active.terminal.process.backend.cwd == shell_home / 'child'
+                await until(lambda: 'READY>' in terminal_text(ui.active.panes.active))
+                pipe.send_text('pwd\r')
+                await until(lambda: str(shell_home / 'child') in terminal_text(ui.active.panes.active))
+                ui.focus_tab(first)
+                await click(ui, ' Agent ')
+                await until(lambda: ui.active.title == 'Agent')
+                backend = ui.active.panes.active.terminal.process.backend
+                assert backend.cwd == shell_home / 'child'
+                assert backend.command[-2:] == ['chat', '--compact']
+            finally:
+                ui.app.exit(result=0)
+                await asyncio.wait_for(running, timeout=5)
+
+    asyncio.run(run())

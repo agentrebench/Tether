@@ -505,9 +505,10 @@ def context_indicator(engine: QueryEngine, config: TetherConfig) -> str:
 
 
 class TetherREPL:
-    def __init__(self, config: TetherConfig, *, plain: bool = False):
+    def __init__(self, config: TetherConfig, *, plain: bool = False, compact: bool = False):
         self.config = config
-        self._plain = plain
+        self._plain = plain or compact
+        self._compact = compact
         from .native_activity import NativeActivity
         self._native_activity = NativeActivity()
         self._workspace = None
@@ -582,6 +583,17 @@ class TetherREPL:
             "bottom-toolbar": "noreverse noinherit #6c7086",
             "frame.border": "#585b70",  # muted single-line input frame
         })
+        if compact:
+            self._toolbar_style = Style.from_dict({
+                "": "bg:default default",
+                "bottom-toolbar": "noreverse ansibrightblack",
+                "frame.border": "ansibrightblack",
+                "placeholder": "ansibrightblack",
+                "completion-menu.completion": "bg:default default",
+                "completion-menu.completion.current": "bg:default ansicyan bold underline",
+                "completion-menu.meta.completion": "bg:default ansibrightblack",
+                "completion-menu.meta.completion.current": "bg:default ansicyan",
+            })
         try:
             CONFIG_DIR.mkdir(parents=True, exist_ok=True)
             history = FileHistory(str(CONFIG_DIR / "history"))
@@ -645,7 +657,8 @@ class TetherREPL:
         """Run the REPL. ``resume`` restores a saved conversation first:
         "@latest" (or "") from --continue picks the most recent session,
         anything else is treated as a session id."""
-        print_banner(compact=self._workspace is not None)
+        if not getattr(self, "_compact", False):
+            print_banner(compact=self._workspace is not None)
 
         backend = InferenceBackend(self.config)
         if not backend.health_check():
@@ -1343,7 +1356,7 @@ class TetherREPL:
             self._handle_provider(["/model", action], engine)
             return
         if not self.config.is_remote:
-            self._list_models()
+            self._select_local_model(" ".join(sub))
             return
         model_id = " ".join(sub)
         if model_id.isdecimal():
@@ -1367,14 +1380,20 @@ class TetherREPL:
     def _list_models(self, *, force: bool = False, picker: bool = False) -> None:
         cfg = self.config
         if not cfg.is_remote:
-            # llama-server loads one GGUF at startup; listing a file must not
-            # pretend that changing model_path hot-swapped the running server.
-            from ..cli import discover_models
-            models = discover_models(extra_dirs=[Path(p) for p in cfg.gguf_dirs])
-            print(bold("  Local GGUF models"))
-            for model in models:
-                print(f"    {model.path}")
-            print(dim("  Load a local model with: tether start --model <path>"))
+            models = self._discover_local_models()
+            if not models:
+                print(warning("  No local models found."))
+                print(dim("  Download a GGUF to ~/.cache/huggingface/hub/ or add a folder with: tether models add <dir>"))
+                return
+            choices = [self._local_model_choice(model) for model in models]
+            self._listed_models = ("local", choices)
+            print(bold("  Local models"))
+            for index, (model, choice) in enumerate(zip(models, choices), 1):
+                current = " *" if cfg.model_path and Path(cfg.model_path) == model.path else ""
+                print(f"  {index:>2}. {model.name}  {dim(choice['description'])}{current}")
+            print(dim("  Choose with /model <number or model name> · the local server restarts with that model"))
+            if picker and getattr(self, "_workspace", None) is not None:
+                self._workspace.open_models(choices, "Local", "GGUF files on this machine")
             return
         models = provider_models(cfg.provider, cfg, force=force)
         # Keep the current selection visible even during a discovery outage.
@@ -1391,10 +1410,78 @@ class TetherREPL:
         print(dim(f"  {source}"))
         for index, model in enumerate(models, 1):
             current = " *" if model["id"] == cfg.api_model else ""
-            print(f"  {index:>2}. {model['id']}{current}")
+            name = model.get("label") or ""
+            label = f"  {dim(name)}" if name and name != model["id"] else ""
+            print(f"  {index:>2}. {model['id']}{label}{current}")
         print(dim("  Choose with /model <number or model-id> · /model refresh · /model stats"))
         if picker and getattr(self, "_workspace", None) is not None and models:
             self._workspace.open_models(models, label, source)
+
+    def _discover_local_models(self) -> list:
+        from ..cli import discover_models
+        models = discover_models(extra_dirs=[Path(p) for p in self.config.gguf_dirs])
+        self._local_models = models
+        return models
+
+    @staticmethod
+    def _local_model_choice(model) -> dict:
+        bits = [model.format, model.size_human]
+        if model.context_length:
+            bits.append(f"ctx {model.context_human}")
+        return {"id": str(model.path), "label": model.name, "description": " · ".join(bits)}
+
+    def _select_local_model(self, choice: str) -> None:
+        """``/model <number or name>`` on the local provider."""
+        from ..cli import resolve_model_choice
+        models = getattr(self, "_local_models", None) or self._discover_local_models()
+        if not models:
+            print(warning("  No local models found."))
+            return
+        model, problem = resolve_model_choice(choice, models)
+        if model is None:
+            print(warning(f"  {problem}"))
+            print(dim("  Run /model to see the numbered list of local models."))
+            return
+        self._switch_local_model(model)
+
+    def _switch_local_model(self, model) -> None:
+        """Restart llama-server with ``model``; config follows only on success.
+
+        llama-server loads one GGUF per process, so a selection is a server
+        restart, never a silent config change that the running server ignores.
+        """
+        from ..cli import (_launch_server_background, configure_context, convert_model, server_serves,
+                           stop_server_on_port)
+        cfg = self.config
+        if model.format != "gguf":
+            # The conversation workspace owns stdin, so it cannot answer the
+            # quantization prompt; the scrolling REPL asks as usual.
+            quant = "Q4_K_M" if self._workspace is not None else None
+            if quant:
+                print(dim(f"  Converting with {quant} (use tether start --model <path> to pick another)."))
+            if not convert_model(model, quant_type=quant):
+                print(error("  Conversion failed; the current model stays loaded."))
+                return
+        if server_serves(cfg, model.path):
+            cfg.model_path = str(model.path)
+            cfg.save()
+            print(success(f"  {model.name} is already loaded ({cfg.server_url})"))
+            return
+        previous = (cfg.context_size, cfg.parallel_slots, cfg.cache_type_k, cfg.cache_type_v)
+        configure_context(cfg, model)
+        print(dim(f"  restarting llama-server with {model.name}…"))
+        ok = stop_server_on_port(cfg)
+        if not ok:
+            print(error(f"  The server on port {cfg.port} did not stop; the current model stays loaded."))
+        elif _launch_server_background(cfg, model_override=model.path) is None:
+            print(error("  llama-server did not start, so no local model is loaded now."))
+            print(dim(f"  Try again with /model, or: tether start --model {model.path}"))
+        else:
+            cfg.model_path = str(model.path)
+            cfg.save()
+            print(success(f"  switched to local ({model.name}) · {cfg.context_size:,} context"))
+            return
+        cfg.context_size, cfg.parallel_slots, cfg.cache_type_k, cfg.cache_type_v = previous
 
     def _show_model_stats(self, engine: QueryEngine) -> None:
         """Show what /model currently reflects: the active model, whether it's
@@ -2055,10 +2142,12 @@ class TetherREPL:
         if n_tools:
             bits.append(f"{n_tools} tool{'s' if n_tools != 1 else ''}")
 
-        # A hairline rule closes the turn: "─ 4.2s · 1.2k tok · 3 tools ───────"
-        label = f"─ {' · '.join(bits)} "
-        fill = max(0, term_width() - len(label))
-        print(f"{DIM}{label}{'─' * fill}{RESET}")
+        if getattr(self, "_compact", False):
+            print(dim("  " + " · ".join(bits)))
+        else:
+            label = f"─ {' · '.join(bits)} "
+            fill = max(0, term_width() - len(label))
+            print(f"{DIM}{label}{'─' * fill}{RESET}")
 
         if result.stop_reason not in ("completed", "cancelled"):
             print(f"  {warning(result.stop_reason)}")
@@ -2202,6 +2291,15 @@ class TetherREPL:
 
     def _print_welcome(self, time_greeting: str) -> None:
         cwd = self._home_abbrev(os.getcwd())
+        if getattr(self, "_compact", False):
+            from .workspace import provider_identity
+            _, provider, _ = provider_identity(self.config.provider)
+            print(f"\n  {CYAN}◇{RESET} {BOLD}tether{RESET} {dim('/ ' + provider)}")
+            print(dim(f"  {cwd}"))
+            print(f"\n  {BOLD}What would you like to work on?{RESET}")
+            print(dim("  /help commands  ·  /plan plan first  ·  /resume continue"))
+            print()
+            return
         if self.config.is_remote:
             model = self.config.api_model or self.config.provider
         else:
@@ -2213,7 +2311,9 @@ class TetherREPL:
         print(f"  {dim('/help commands · /plan plan first · /resume continue a past chat')}")
         print()
 
-    def _bottom_toolbar(self, engine: QueryEngine) -> HTML:
+    def _bottom_toolbar(self, engine: QueryEngine):
+        if getattr(self, "_compact", False):
+            return self._compact_status(engine)
         cwd = self._home_abbrev(os.getcwd())
         estimated_tokens = engine._estimate_message_tokens()
         max_tokens = self.config.context_size
@@ -2237,10 +2337,31 @@ class TetherREPL:
             parts.insert(0, "<style fg='#c6a0f6'><b>PLAN</b></style>")
         return HTML("  ·  ".join(parts))
 
+    def _compact_status(self, engine: QueryEngine):
+        """Plain fragments keep model names literal and use the terminal palette."""
+        import shutil
+        model = (self.config.api_model or self.config.provider) if self.config.is_remote else (
+            Path(self.config.model_path).stem if self.config.model_path else "local model")
+        pct = min(100, int(engine._estimate_message_tokens() / max(1, self.config.context_size) * 100))
+        _, choices, effort = reasoning_setting(self.config)
+        parts = [model]
+        if choices or effort != "default":
+            parts.append(effort)
+        parts.append(f"{pct}% context")
+        if getattr(engine, "plan_mode", False):
+            parts.insert(0, "PLAN")
+        width = shutil.get_terminal_size().columns
+        label = "  " + " · ".join(parts)
+        hint = "    Enter send · Alt+Enter newline"
+        if len(label + hint) < width:
+            label += hint
+        return [("class:bottom-toolbar", label)]
+
     def _read_input(self, engine: QueryEngine) -> str:
-        """Read one submission inside a bordered input box — a double-line frame
-        that hugs the input and grows with it (the harness-style input frame),
-        with the status bar just beneath it.
+        """Read a submission with completion, history and multiline paste support.
+
+        Compact chat has a content-sized composer capped at eight rows; explicit
+        plain mode retains its original frame. Status appears below the input.
 
         Fully isolated and guarded: completion (the `/` menu), history,
         auto-suggest and the enter/paste key handling are all preserved, and ANY
@@ -2262,7 +2383,8 @@ class TetherREPL:
                                                         FormattedTextControl)
             from prompt_toolkit.layout.dimension import Dimension
             from prompt_toolkit.layout.menus import CompletionsMenu
-            from prompt_toolkit.layout.processors import BeforeInput
+            from prompt_toolkit.layout.processors import AfterInput, BeforeInput, ConditionalProcessor
+            from prompt_toolkit.filters import Condition
 
             buf = Buffer(
                 completer=TetherCompleter(skill_store=self.skill_store, config=self.config),
@@ -2310,13 +2432,21 @@ class TetherREPL:
                 if not buf.text:
                     event.app.exit(exception=EOFError)
 
+            compact = getattr(self, "_compact", False)
             border = "class:frame.border"
+            processors = [BeforeInput(ANSI(self._prompt(engine)))]
+            if compact:
+                processors.append(ConditionalProcessor(
+                    AfterInput([("class:placeholder", "Ask Tether to build, fix, or explain…")]),
+                    Condition(lambda: not buf.text),
+                ))
             input_window = Window(
                 BufferControl(
                     buffer=buf,
-                    input_processors=[BeforeInput(ANSI(self._prompt(engine)))],
+                    input_processors=processors,
                 ),
-                height=Dimension(min=1),
+                height=Dimension(min=1, max=8) if compact else Dimension(min=1),
+                dont_extend_height=compact,
                 wrap_lines=True,
             )
 
@@ -2335,6 +2465,8 @@ class TetherREPL:
                 VSplit([vbar(), input_window, vbar()]),
                 VSplit([corner("╰"), hbar(), corner("╯")]),
             ])
+            if compact:
+                box = HSplit([hbar(), input_window, Window(height=1)])
             status = Window(
                 FormattedTextControl(lambda: self._bottom_toolbar(engine)),
                 height=1, style="class:bottom-toolbar",
@@ -2350,8 +2482,16 @@ class TetherREPL:
                 style=self._toolbar_style,
                 full_screen=False,
                 mouse_support=False,
+                erase_when_done=compact,
             )
-            result = app.run()
+            from .native_resize import NativeResize
+            resize = NativeResize(app, kb, enabled=None if compact else False)
+            try:
+                result = app.run()
+            finally:
+                resize.close()
+            if compact and result and result.strip():
+                print(f"\n  {CYAN}›{RESET} " + result.replace("\n", "\n    ") + "\n")
             return result if result is not None else ""
         except (EOFError, KeyboardInterrupt):
             raise
@@ -2363,6 +2503,8 @@ class TetherREPL:
             )
 
     def _prompt(self, engine: QueryEngine) -> str:
+        if getattr(self, "_compact", False):
+            return f"  {CYAN}›{RESET} "
         ctx = context_indicator(engine, self.config)
         cwd_name = os.path.basename(os.getcwd()) or os.getcwd()
         plan = f" {MAGENTA}{BOLD}[PLAN]{RESET}" if getattr(engine, "plan_mode", False) else ""

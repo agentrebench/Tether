@@ -641,8 +641,11 @@ def _is_prequantized_hf(model_path: Path) -> bool:
     return False
 
 
-def _convert_to_gguf(model: DiscoveredModel) -> Path | None:
-    """Convert a safetensors model to GGUF. Returns path to final GGUF or None."""
+def _convert_to_gguf(model: DiscoveredModel, quant_type: str | None = None) -> Path | None:
+    """Convert a safetensors model to GGUF. Returns path to final GGUF or None.
+
+    ``quant_type`` skips the interactive quantization prompt (for callers
+    whose stdin is not a terminal, such as the conversation workspace)."""
     from .ui.colors import bold, dim, error, info, warning, DIM, RESET, CYAN, GREEN
 
     print()
@@ -667,6 +670,11 @@ def _convert_to_gguf(model: DiscoveredModel) -> Path | None:
     if prequantized:
         quant_type = None  # no re-quantization
         print(dim("  Pre-quantized model detected — converting with native quantization preserved."))
+    elif quant_type:
+        if quant_type not in QUANT_TYPES:
+            print(error(f"  Unknown quantization: {quant_type} (choose from {', '.join(QUANT_TYPES)})"))
+            return None
+        print(dim(f"  Quantization: {quant_type}"))
     else:
         # Pick quantization type
         print(f"  {bold('Select quantization')}")
@@ -807,6 +815,131 @@ def _convert_to_gguf(model: DiscoveredModel) -> Path | None:
     return final_path
 
 
+def model_from_path(path: Path) -> DiscoveredModel | None:
+    """A model the user named explicitly: a GGUF file, a Hugging Face
+    snapshot directory with safetensors weights, or one of its files."""
+    path = Path(path).expanduser()
+    if path.is_file() and path.suffix == ".safetensors":
+        path = path.parent
+    if path.is_file() and path.suffix == ".gguf":
+        meta = read_gguf_metadata(path)
+        arch = meta.get("general.architecture", "") if meta else ""
+        ctx = meta.get(f"{arch}.context_length") if meta and arch else None
+        parts = _split_gguf_parts(path)
+        return DiscoveredModel(name=meta.get("general.name", path.stem) if meta else path.stem, path=path,
+                               format="gguf", size_bytes=_total_size(parts), source="local",
+                               context_length=ctx, architecture=arch or None)
+    if path.is_dir():
+        ggufs = _find_gguf_in_dir(path)
+        if len(ggufs) == 1:
+            return model_from_path(ggufs[0])
+        safetensors = sorted(path.glob("*.safetensors"))
+        if safetensors:
+            return DiscoveredModel(name=path.name, path=path, format="safetensors",
+                                   size_bytes=_total_size(safetensors), source="local",
+                                   context_length=get_hf_context_length(path))
+    return None
+
+
+def convert_model(model: DiscoveredModel, *, quant_type: str | None = None) -> bool:
+    """Make ``model`` a GGUF in place; True when it already is or conversion succeeded."""
+    if model.format == "gguf":
+        return True
+    result = _convert_to_gguf(model, quant_type=quant_type)
+    if result is None:
+        return False
+    meta = read_gguf_metadata(result)
+    if meta:
+        arch = meta.get("general.architecture", "")
+        model.architecture = arch or model.architecture
+        ctx = meta.get(f"{arch}.context_length")
+        if ctx:
+            model.context_length = ctx
+    model.path = result
+    model.format = "gguf"
+    return True
+
+
+def configure_context(config: TetherConfig, model: DiscoveredModel) -> None:
+    """Size the context window from model metadata and available memory.
+
+    If memory is very tight, try quantised KV cache (q4_0) and fewer parallel
+    slots before settling for a small context window."""
+    if not model.context_length:
+        return
+    ctk, ctv = config.cache_type_k, config.cache_type_v
+    optimal_ctx = _optimal_context_size(model, config.parallel_slots, ctk, ctv)
+
+    if optimal_ctx <= 8192 and config.parallel_slots > 1:
+        # Memory-constrained: try with fewer slots for more context
+        for fewer in (2, 1):
+            better_ctx = _optimal_context_size(model, fewer, ctk, ctv)
+            if better_ctx > optimal_ctx:
+                optimal_ctx = better_ctx
+                config.parallel_slots = fewer
+                break
+
+    if optimal_ctx <= 16384 and ctk == "f16":
+        # Still tight -- enable quantised KV cache (q4_0) to reclaim
+        # memory.  This is the "turbo quant" approach: ~4x KV savings
+        # with minimal quality loss on most architectures.
+        ctk, ctv = "q4_0", "q4_0"
+        slots = config.parallel_slots
+        q_ctx = _optimal_context_size(model, slots, ctk, ctv)
+        if q_ctx <= 8192 and slots > 1:
+            for fewer in (2, 1):
+                better = _optimal_context_size(model, fewer, ctk, ctv)
+                if better > q_ctx:
+                    q_ctx = better
+                    slots = fewer
+                    break
+        if q_ctx > optimal_ctx:
+            optimal_ctx = q_ctx
+            config.parallel_slots = slots
+            config.cache_type_k = ctk
+            config.cache_type_v = ctv
+
+    config.context_size = optimal_ctx
+
+
+def server_serves(config: TetherConfig, path: Path) -> bool:
+    """Whether the llama-server on the configured port already serves ``path``."""
+    served = served_model_path(config)
+    if not served:
+        return False
+    try:
+        return Path(served).expanduser().resolve() == Path(path).resolve()
+    except OSError:
+        return served == str(path)
+
+
+def resolve_model_choice(choice: str, models: list[DiscoveredModel]) -> tuple[DiscoveredModel | None, str]:
+    """Pick a discovered model by list number, name, file name, path, or a
+    unique case-insensitive fragment of the name. Returns ``(model, problem)``
+    where ``problem`` explains an empty result."""
+    text = choice.strip()
+    if not text:
+        return None, "Enter a model number or name."
+    if text.isdecimal():
+        index = int(text) - 1
+        if 0 <= index < len(models):
+            return models[index], ""
+        return None, f"Invalid choice: {text} (choose 1-{len(models)})"
+    folded = text.casefold()
+    expanded = Path(text).expanduser()
+    for model in models:
+        names = {model.name, model.path.name, model.path.stem, str(model.path)}
+        if folded in {name.casefold() for name in names} or model.path == expanded:
+            return model, ""
+    matches = [m for m in models if folded in m.name.casefold() or folded in m.path.name.casefold()]
+    if len(matches) == 1:
+        return matches[0], ""
+    if matches:
+        shown = ", ".join(m.name for m in matches[:4]) + (" …" if len(matches) > 4 else "")
+        return None, f"'{text}' matches several models: {shown}"
+    return None, f"No local model matches '{text}'."
+
+
 def select_model(config: TetherConfig, extra_dirs: list[Path] | None = None) -> Path | None:
     """Interactive model selector. Returns path to model file/dir, or None."""
     from .ui.colors import bold, dim, error, DIM, RESET, CYAN, GREEN, YELLOW, MAGENTA
@@ -857,6 +990,7 @@ def select_model(config: TetherConfig, extra_dirs: list[Path] | None = None) -> 
         prompt_str = "  > "
         if default_idx:
             prompt_str = f"  [{default_idx}]> "
+        print(dim("  Enter a number or a model name."))
 
         try:
             choice = input(prompt_str).strip()
@@ -869,68 +1003,14 @@ def select_model(config: TetherConfig, extra_dirs: list[Path] | None = None) -> 
         elif not choice:
             choice = "1"
 
-        try:
-            idx = int(choice) - 1
-            if idx < 0 or idx >= len(models):
-                print(error(f"  Invalid choice: {choice}"))
-                return None
-        except ValueError:
-            print(error(f"  Invalid choice: {choice}"))
+        selected, problem = resolve_model_choice(choice, models)
+        if selected is None:
+            print(error(f"  {problem}"))
             return None
 
-        selected = models[idx]
-
-    if selected.format != "gguf":
-        result = _convert_to_gguf(selected)
-        if result is None:
-            return None
-        # Re-read metadata from the new GGUF
-        meta = read_gguf_metadata(result)
-        if meta:
-            arch = meta.get("general.architecture", "")
-            ctx = meta.get(f"{arch}.context_length")
-            if ctx:
-                selected.context_length = ctx
-        selected.path = result
-        selected.format = "gguf"
-
-    # Auto-configure context size from model metadata + available memory.
-    # If memory is very tight, try quantised KV cache (q4_0) and fewer
-    # parallel slots before settling for a small context window.
-    if selected.context_length:
-        ctk, ctv = config.cache_type_k, config.cache_type_v
-        optimal_ctx = _optimal_context_size(selected, config.parallel_slots, ctk, ctv)
-
-        if optimal_ctx <= 8192 and config.parallel_slots > 1:
-            # Memory-constrained: try with fewer slots for more context
-            for fewer in (2, 1):
-                better_ctx = _optimal_context_size(selected, fewer, ctk, ctv)
-                if better_ctx > optimal_ctx:
-                    optimal_ctx = better_ctx
-                    config.parallel_slots = fewer
-                    break
-
-        if optimal_ctx <= 16384 and ctk == "f16":
-            # Still tight -- enable quantised KV cache (q4_0) to reclaim
-            # memory.  This is the "turbo quant" approach: ~4x KV savings
-            # with minimal quality loss on most architectures.
-            ctk, ctv = "q4_0", "q4_0"
-            slots = config.parallel_slots
-            q_ctx = _optimal_context_size(selected, slots, ctk, ctv)
-            if q_ctx <= 8192 and slots > 1:
-                for fewer in (2, 1):
-                    better = _optimal_context_size(selected, fewer, ctk, ctv)
-                    if better > q_ctx:
-                        q_ctx = better
-                        slots = fewer
-                        break
-            if q_ctx > optimal_ctx:
-                optimal_ctx = q_ctx
-                config.parallel_slots = slots
-                config.cache_type_k = ctk
-                config.cache_type_v = ctv
-
-        config.context_size = optimal_ctx
+    if not convert_model(selected):
+        return None
+    configure_context(config, selected)
 
     # Save selection
     config.model_path = str(selected.path)
@@ -1347,6 +1427,18 @@ def _resume_target(args: argparse.Namespace) -> str:
     return ""
 
 
+def _repl_options(args: argparse.Namespace) -> dict:
+    """The scrolling REPL (``--plain``, ``--compact``, and the native/terminal
+    Agent tabs) uses the compact session look; ``--classic`` keeps the full
+    TETHER banner and framed composer. The full-screen conversation workspace
+    is unchanged."""
+    plain = bool(getattr(args, "plain", False) or getattr(args, "compact", False))
+    options = {"plain": plain}
+    if plain and not getattr(args, "classic", False):
+        options["compact"] = True
+    return options
+
+
 def _select_terminal_agent(args: argparse.Namespace, config: TetherConfig) -> bool:
     """Interactive terminal entry only; explicit models, resumes and pipes skip it."""
     if (getattr(args, "plain", False) or getattr(args, "model", None) or _resume_target(args)
@@ -1367,6 +1459,48 @@ def cmd_terminal(args: argparse.Namespace) -> int:
     return ShellWorkspace(TetherConfig.load()).run() or 0
 
 
+def _start_local_model(config: TetherConfig, args: argparse.Namespace,
+                       extra_dirs: list[Path]) -> tuple[bool, subprocess.Popen | None]:
+    """Serve the model named by ``--model`` or chosen interactively.
+
+    Returns ``(ok, server_proc)``; ``server_proc`` is None when a running
+    server is reused. An explicit ``--model`` always wins: non-GGUF weights
+    are converted first, and a server holding a different model is restarted.
+    """
+    from .ui.colors import dim, error, success
+
+    requested = getattr(args, "model", None)
+    if requested:
+        model = model_from_path(Path(requested))
+        if model is None:
+            print(error(f"Model not found: {requested}"))
+            print(dim("  Expected a .gguf file or a folder with safetensors weights."))
+            return False, None
+        if not convert_model(model):
+            return False, None
+        configure_context(config, model)
+        config.model_path = str(model.path)
+        config.save()
+        model_path = model.path
+        if server_is_running(config):
+            if server_serves(config, model_path):
+                print(success(f"Server already running with {model.name} at {config.server_url}"))
+                return True, None
+            print(dim(f"  restarting llama-server with {model.name}…"))
+            if not stop_server_on_port(config):
+                print(error(f"The server on port {config.port} did not stop; run: tether stop"))
+                return False, None
+    elif server_is_running(config):
+        print(success(f"Server already running at {config.server_url}"))
+        return True, None
+    else:
+        model_path = select_model(config, extra_dirs=extra_dirs)
+        if model_path is None:
+            return False, None
+    server_proc = _launch_server_background(config, model_override=model_path)
+    return server_proc is not None, server_proc
+
+
 def cmd_start(args: argparse.Namespace) -> int:
     """Start server (if needed) + REPL in one command."""
     from .ui.repl import TetherREPL
@@ -1375,8 +1509,10 @@ def cmd_start(args: argparse.Namespace) -> int:
     config = TetherConfig.load()
     if not _select_terminal_agent(args, config):
         return 0
-    if getattr(args, "compact", False):
-        args.plain = True
+    if getattr(args, "model", None) and config.is_remote:
+        # An explicit local model must not be ignored in favour of the saved API provider.
+        apply_provider_selection(config, "local")
+    options = _repl_options(args)
     if args.port:
         config.port = args.port
 
@@ -1391,8 +1527,9 @@ def cmd_start(args: argparse.Namespace) -> int:
             print(error("Provider 'codex' is configured but Codex CLI is not logged in."))
             print(dim("  run: codex login --device-auth"))
             return 1
-        print(success(f"  using Codex CLI provider ({config.api_model})"))
-        print()
+        if not options.get("compact"):
+            print(success(f"  using Codex CLI provider ({config.api_model})"))
+            print()
     elif config.is_remote:
         # Remote provider: no local server to start. Just check that *some*
         # key is present (env var or stored) so we fail fast.
@@ -1405,26 +1542,13 @@ def cmd_start(args: argparse.Namespace) -> int:
             else:
                 print(dim("  store one with:  tether key set"))
             return 1
-    elif server_is_running(config):
-        print(success(f"Server already running at {config.server_url}"))
     else:
-        # Model selection
-        if getattr(args, "model", None):
-            model_path = Path(args.model)
-            if not model_path.exists():
-                from .ui.colors import error
-                print(error(f"Model not found: {model_path}"))
-                return 1
-        else:
-            model_path = select_model(config, extra_dirs=extra_dirs)
-            if model_path is None:
-                return 1
-        server_proc = _launch_server_background(config, model_override=model_path)
-        if server_proc is None:
+        ok, server_proc = _start_local_model(config, args, extra_dirs)
+        if not ok:
             return 1
 
     try:
-        repl = TetherREPL(config, plain=getattr(args, "plain", False))
+        repl = TetherREPL(config, **options)
         return repl.run(resume=_resume_target(args))
     finally:
         if server_proc and server_proc.poll() is None:
@@ -1525,6 +1649,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     config = TetherConfig.load()
     if not _select_terminal_agent(args, config):
         return 0
+    if getattr(args, "model", None) and config.is_remote:
+        apply_provider_selection(config, "local")
+    options = _repl_options(args)
     if args.port:
         config.port = args.port
 
@@ -1539,8 +1666,9 @@ def cmd_run(args: argparse.Namespace) -> int:
             print(error("Provider 'codex' is configured but Codex CLI is not logged in."))
             print(dim("  run: codex login --device-auth"))
             return 1
-        print(success(f"  using Codex CLI provider ({config.api_model})"))
-        print()
+        if not options.get("compact"):
+            print(success(f"  using Codex CLI provider ({config.api_model})"))
+            print()
     elif config.is_remote:
         # Remote provider: no local server to start. Just check that *some*
         # key is present (env var or stored) so we fail fast.
@@ -1553,27 +1681,13 @@ def cmd_run(args: argparse.Namespace) -> int:
             else:
                 print(dim("  store one with:  tether key set"))
             return 1
-    elif server_is_running(config):
-        print(success(f"  server already running at {config.server_url}"))
-        print()
     else:
-        # Model selection
-        if getattr(args, "model", None):
-            model_path = Path(args.model)
-            if not model_path.exists():
-                from .ui.colors import error
-                print(error(f"Model not found: {model_path}"))
-                return 1
-        else:
-            model_path = select_model(config, extra_dirs=extra_dirs)
-            if model_path is None:
-                return 1
-        server_proc = _launch_server_background(config, model_override=model_path)
-        if server_proc is None:
+        ok, server_proc = _start_local_model(config, args, extra_dirs)
+        if not ok:
             return 1
 
     try:
-        repl = TetherREPL(config, plain=getattr(args, "plain", False))
+        repl = TetherREPL(config, **options)
         return repl.run(resume=_resume_target(args))
     finally:
         if server_proc and server_proc.poll() is None:
@@ -1944,6 +2058,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="version", version=f"tether {__version__}")
     parser.add_argument("--plain", action="store_true", help="Use the scrolling REPL without the agent sidebar")
+    parser.add_argument("--classic", action="store_true",
+                        help="Show the full TETHER banner and framed composer in the scrolling REPL")
     subparsers = parser.add_subparsers(dest="command")
 
     subparsers.add_parser("terminal", help="Open the terminal workspace without agent setup")
@@ -1951,6 +2067,8 @@ def build_parser() -> argparse.ArgumentParser:
     start_parser.add_argument("--compact", action="store_true", help="Use compact chat after choosing an agent")
     start_parser.add_argument("--plain", action="store_true", default=argparse.SUPPRESS,
                               help="Use the scrolling REPL without the agent sidebar")
+    start_parser.add_argument("--classic", action="store_true", default=argparse.SUPPRESS,
+                              help="Show the full TETHER banner and framed composer in the scrolling REPL")
     start_parser.add_argument("--port", type=int, help="Server port")
     start_parser.add_argument("--model", type=str, help="Path to GGUF model (skip interactive selector)")
     start_parser.add_argument(
@@ -1972,6 +2090,8 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser = subparsers.add_parser("run", help="Start server (if needed) + REPL")
     run_parser.add_argument("--plain", action="store_true", default=argparse.SUPPRESS,
                             help="Use the scrolling REPL without the agent sidebar")
+    run_parser.add_argument("--classic", action="store_true", default=argparse.SUPPRESS,
+                            help="Show the full TETHER banner and framed composer in the scrolling REPL")
     run_parser.add_argument("--port", type=int, help="Server port")
     run_parser.add_argument("--model", type=str, help="Path to GGUF model (skip interactive selector)")
     run_parser.add_argument(

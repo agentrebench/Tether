@@ -16,6 +16,7 @@ from prompt_toolkit.mouse_events import MouseEventType
 from prompt_toolkit.output import ColorDepth
 from prompt_toolkit.styles import Style
 
+from .pane_select import PaneSelection, export_clipboard
 from .panes import Pane, PaneLayout
 from .shell_dialog import ShellDialog
 from .shell_theme import save_settings
@@ -49,13 +50,18 @@ class ShellWorkspace:
         self.backends = set()
         self._next_id = 1
         self._stopping = False
+        # Mouse tracking keeps tabs and buttons clickable; panes provide their
+        # own drag-to-copy and click-to-paste (see pane_select). F10, Alt+M,
+        # or the Mouse button hands the mouse to the terminal emulator instead.
+        self.mouse_enabled = True
         self.empty = Window(FormattedTextControl("Open a terminal with +, or choose Settings."))
         bindings = KeyBindings()
         idle = Condition(lambda: self.dialog is None)
         for key, action in (("f2", self.open_settings), ("f4", self.new_terminal),
                             ("f6", self.next_pane), ("f7", self.next_tab),
-                            ("f8", self.split), ("f9", self.new_agent)):
-            bindings.add(key, filter=idle, eager=True)(lambda event, action=action: action())
+                            ("f8", self.split), ("f9", self.new_agent),
+                            ("f10", self.toggle_mouse), ("escape m", self.toggle_mouse)):
+            bindings.add(*key.split(), filter=idle, eager=True)(lambda event, action=action: action())
         for key in ("escape", "c-c"):
             bindings.add(key, filter=~idle, eager=True)(lambda event: self.close_dialog())
         bindings.add("s-pageup", filter=idle, eager=True)(lambda event: self.scrollback())
@@ -65,7 +71,7 @@ class ShellWorkspace:
         # belong to the PTY, not to an agent composer or a global prefix map.
         bar = VSplit([
             Window(FormattedTextControl(self.tab_bar), height=1, style="class:bar"),
-            Window(FormattedTextControl(self.actions), width=30, height=1, style="class:bar"),
+            Window(FormattedTextControl(self.actions), width=38, height=1, style="class:bar"),
         ])
         self.root = FloatContainer(HSplit([
             bar, DynamicContainer(self.visible_content),
@@ -75,12 +81,14 @@ class ShellWorkspace:
         ], style="class:terminal"), floats=[])
         self.app = Application(
             layout=Layout(self.root), input=input, output=output, full_screen=True,
-            mouse_support=True, key_bindings=bindings, color_depth=ColorDepth.TRUE_COLOR,
+            mouse_support=Condition(lambda: self.mouse_enabled), key_bindings=bindings,
+            color_depth=ColorDepth.TRUE_COLOR,
             style=Style.from_dict({
                 "": "bg:#101418 #dce3e9", "terminal": "bg:#101418 #dce3e9",
                 "bar": "bg:#1b2229 #aab8c5", "brand": "#7dd9bf bold",
                 "tab-active": "bg:#33434a #e5fff7 bold noreverse",
                 "muted": "#91a0ae", "border": "#33434a", "action": "#dce3e9",
+                "pane-selection": "reverse",
                 "dialog": "bg:#1b2229 #dce3e9", "dialog.body": "bg:#1b2229 #dce3e9",
                 "dialog.body text-area": "bg:#101418 #e5fff7",
                 "dialog.body text-area last-line": "nounderline",
@@ -119,8 +127,36 @@ class ShellWorkspace:
     def actions(self):
         return [("class:action", text, self.click(action)) for text, action in (
             (" + ", self.new_terminal), (" Agent ", self.new_agent),
-            (" Split ", self.split), (" Settings ", self.open_settings),
+            (" Split ", self.split), (" Mouse ", self.toggle_mouse), (" Settings ", self.open_settings),
         )]
+
+    MOUSE_ON_NOTICE = "Mouse on: drag to copy · right-click or middle-click pastes · tabs and buttons are clickable"
+    MOUSE_OFF_NOTICE = "Mouse off: your terminal selects and copies · F10 or Alt+M brings clicks back"
+
+    def toggle_mouse(self):
+        """Hand the mouse to the terminal emulator, or take it back.
+
+        Buttons cannot be clicked while tracking is off, so the notice names
+        the key that switches back.
+        """
+        self.mouse_enabled = not self.mouse_enabled
+        self.notice = self.MOUSE_ON_NOTICE if self.mouse_enabled else self.MOUSE_OFF_NOTICE
+        self.invalidate()
+
+    def copied(self, text):
+        self.app.clipboard.set_text(text)
+        export_clipboard(text, self.app.output)
+        count = len(text)
+        self.notice = f"Copied {count} character{'s' if count != 1 else ''} · right-click or middle-click pastes"
+        self.invalidate()
+
+    def paste_into(self, terminal):
+        text = self.app.clipboard.get_data().text
+        if not text:
+            self.notice = "Nothing copied yet: drag across text to copy it."
+            self.invalidate()
+            return
+        terminal.process.write_input(text, paste=True)
 
     def status(self):
         if self.is_scrollback():
@@ -196,6 +232,15 @@ class ShellWorkspace:
             self.active.panes.active.terminal.exit_copy_mode()
             self.invalidate()
 
+    def active_directory(self) -> Path:
+        """Where the active shell is now; new tabs, splits, and agents start there."""
+        if self.active and self.active.panes.active.terminal is not None:
+            backend = self.active.panes.active.terminal.process.backend
+            current = backend.current_directory() if hasattr(backend, "current_directory") else None
+            if current is not None and current.is_dir():
+                return current
+        return self.cwd
+
     def _open(self, *, draft=None, agent=False, direction=None):
         if sum(len(tab.panes.leaves()) for tab in self.tabs) >= self.MAX_TERMINALS:
             self.notice = "Eight terminals are open. Close a tab before opening another."
@@ -203,25 +248,33 @@ class ShellWorkspace:
             return None
         from ptterm import Terminal
         config = self.config
+        cwd = self.active_directory()
         shell, theme, font, file = draft or (config.terminal_shell, config.terminal_theme,
                                            config.terminal_font_mode, config.terminal_theme_file)
         backend = None
         try:
-            backend = ShellBackend(self.cwd, "" if agent else shell,
+            backend = ShellBackend(cwd, "" if agent else shell,
                                    theme="inherit" if agent else theme, font=font, theme_file=file,
                                    command=tether_command("chat", "--compact") if agent else None)
             tab = self.active if direction and self.active else TerminalTab(self._next_id, "Agent" if agent else Path(backend.shell).name)
             terminal = Terminal(backend=backend, style="class:terminal",
                                 done_callback=lambda: backend.loop.call_soon(self.finished, tab, backend))
             mouse_handler = terminal.terminal_control.mouse_handler
+            selection = PaneSelection(terminal, self.copied, self.paste_into)
 
             def mouse(event):
                 screen = terminal.process.screen
                 application_mouse = (screen.mouse_support_enabled or screen.sgr_mouse_support_enabled
                                      or screen.urxvt_mouse_support_enabled)
-                if event.event_type == MouseEventType.SCROLL_UP and not application_mouse:
+                if application_mouse:
+                    mouse_handler(event)
+                elif event.event_type == MouseEventType.SCROLL_UP:
                     tab.panes.active = next(p for p in tab.panes.leaves() if p.terminal is terminal)
                     self.scrollback(terminal)
+                elif selection.handle(event):
+                    if event.event_type == MouseEventType.MOUSE_UP:
+                        mouse_handler(event)  # a click still focuses the pane
+                    self.invalidate()
                 else:
                     mouse_handler(event)
             terminal.terminal_control.mouse_handler = mouse

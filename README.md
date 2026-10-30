@@ -149,10 +149,20 @@ New terminals start in the directory where you launched Tether.
 tabs, **F8** splits right, and **F9** opens an Agent tab. Normal shell key bindings
 are passed through. Scroll the mouse wheel or press **Shift+PageUp** to browse
 terminal history; **Esc** returns to the live prompt. `tether terminal` explicitly
-opens this workspace.
+opens this workspace. Drag across any pane to copy the text under the selection,
+then right-click or middle-click to paste it into a pane; this works over SSH
+too. The copy also reaches your system clipboard when the terminal accepts
+OSC 52 (iTerm2 with clipboard access enabled, kitty, WezTerm, Alacritty, foot)
+or when `pbcopy`, `wl-copy`, `xclip`, or `xsel` is available locally. Pasting
+with your terminal's own shortcut works as usual. Programs that use the mouse
+themselves, such as vim or htop, receive the mouse instead. To let your
+terminal select text natively, press **F10** or **Alt+M** (or click **Mouse**);
+tabs and buttons stop responding to clicks until you press it again.
 
 The **Agent** tab shows the provider picker only when requested, then starts a
-compact Tether chat. You can return to your shell at any time by clicking its tab.
+compact Tether chat. New tabs, splits, and Agent tabs open in the directory the
+active shell is currently in, so `cd` into a project and click **Agent** to work
+there; `/cd <path>` moves a running agent. You can return to your shell at any time by clicking its tab.
 For the full conversation workspace described below, run **`tether chat`**
 (`tether start` and `tether run` also remain available). Choose Claude, Codex, GPT,
 DeepSeek, Kimi, GLM, or a local model with Up/Down and Enter, or click an entry.
@@ -206,8 +216,12 @@ changes Tether's working directory and the starting directory for new shells;
 existing shells keep their own directories. Finish or stop the current Tether task
 before changing folders. File previews are read only.
 
-Use `tether --plain` (or `tether start --plain`) for the original scrolling
-REPL. Pipes and `TERM=dumb` select that mode automatically. Provider marks use
+Use `tether --plain` (or `tether start --plain`) for the scrolling REPL. It
+uses the same compact session look as the macOS app's Agent pane: a small
+`◇ tether / Provider` heading, a one-line composer with a placeholder, and a
+status line showing the model, reasoning effort, and context use. Add
+`--classic` for the full TETHER banner and framed composer. Pipes and
+`TERM=dumb` select the scrolling mode automatically. Provider marks use
 standard Unicode characters and text labels, so no Nerd Font is required.
 
 ### Zsh themes and Powerline fonts
@@ -471,7 +485,7 @@ tether remote                                   # confirms: provider=<name>, api
 tether start
 ```
 
-If neither key source is configured when you run `tether remote <provider>`, it offers to capture and store one inline. Inside the REPL, `/provider <name>` switches providers without restarting. `/model` opens a searchable picker for the active provider; use arrow keys and Enter, or `/model <model-id>` to select directly. `/model list` prints a numbered list, `/model <number>` selects from it, and `/model refresh` reloads the list. Codex reads its installed CLI catalog, including new models such as GPT-6 Astra, while API providers use their own model endpoints. If discovery is unavailable, Tether labels the fallback catalog. `/model stats` shows the active model and token usage.
+If neither key source is configured when you run `tether remote <provider>`, it offers to capture and store one inline. Inside the REPL, `/provider <name>` switches providers without restarting. `/model` opens a searchable picker for the active provider; use arrow keys and Enter, or `/model <model-id>` to select directly. `/model list` prints a numbered list, `/model <number>` selects from it, and `/model refresh` reloads the list. On the local provider the list shows your GGUF files; choose one by number, name, or file name and Tether restarts llama-server with it (the startup selector accepts the same choices). Codex reads its installed CLI catalog, including new models such as GPT-6 Astra, while API providers use their own model endpoints. If discovery is unavailable, Tether labels the fallback catalog. `/model stats` shows the active model and token usage.
 
 **Custom OpenAI-compatible endpoint** (anything speaking `/v1/chat/completions`):
 
@@ -530,10 +544,14 @@ tether start
 
 An interactive selector lists every model found, with format / size / native context length. Tether auto-tunes `context_size`, `parallel_slots`, and KV cache type to fit your GPU memory, then launches `llama-server` in the background and drops you into the REPL.
 
-Skip the selector when you know the path:
+Skip the selector when you know the path. `--model` always means the local
+provider, even when an API provider is saved, and it restarts a running
+llama-server that holds a different model. A Hugging Face snapshot folder with
+safetensors weights is converted to GGUF first:
 
 ```
 tether start --model ~/Projects/Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-Q8_0.gguf
+tether start --model ~/.cache/huggingface/hub/models--org--repo/snapshots/<hash>
 tether stop                                      # kills the background llama-server
 ```
 
@@ -582,7 +600,7 @@ tether models remove-dir <path>
 
 # common flags on start/run
 --port <n>                # override server port
---model <path>            # skip the interactive selector
+--model <path>            # local GGUF file or safetensors folder (converted); skips the selector
 --gguf-dir <path>         # add an extra GGUF search dir for this run
 ```
 
@@ -614,7 +632,7 @@ Slash commands:
 /provider                               # show current model provider
 /provider <name>                        # switch (e.g. openai, kimi, local)
 /model                                 # choose a model for the active provider
-/model <id or number>                   # switch within the active provider
+/model <id, name, or number>            # switch within the active provider (local: restarts llama-server)
 /model list|refresh|stats               # list / refresh models / show usage
 /effort                                # choose this model's reasoning effort
 /effort <level or number>               # set a supported reasoning setting
